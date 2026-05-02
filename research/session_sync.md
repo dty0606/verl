@@ -115,6 +115,11 @@ Verified in the new repo:
 - Local Windows verification: `python -m py_compile` passed for the patched dataset and diagnostic script; synthetic helper check confirmed assistant greeting strip and JSON-string tool arguments -> dict normalization. P5 remains the source of truth for Qwen3.5 tokenizer/runtime behavior.
 - Next P5 action: run the diagnostic script on `datasets/tau3_sft_thinking_train_only`; only if it passes, retry tiny SFT smoke with `+data.custom_cls.path=verl/utils/dataset/simple_sft_dataset.py`, `+data.custom_cls.name=SimpleSFTDataset`, and `+data.audit_samples=2`.
 
+### 2026-05-02 Codex QC follow-up after `aad2124c`
+
+- Fixed `SimpleSFTDataset` to choose nested-vs-flat tool-call message shape once per row and reuse that same shape for full rendering and all assistant mask prefix/suffix renders.
+- Local verification repeated: `python -m py_compile`, `git diff --check`, and synthetic helper normalization check passed.
+
 ## Evidence Carried Forward
 
 From the old repo:

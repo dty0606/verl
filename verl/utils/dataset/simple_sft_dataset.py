@@ -241,24 +241,30 @@ class SimpleSFTDataset(Dataset):
             **template_kwargs,
         )
 
-    def _choose_template_messages(self, messages, tools, template_kwargs) -> tuple[list[dict[str, Any]], list[int]]:
+    def _render_token_ids(self, messages, tools, template_kwargs, *, add_generation_prompt=False) -> list[int]:
+        return _as_token_list(
+            self._apply_chat_template(
+                messages,
+                tools,
+                template_kwargs,
+                add_generation_prompt=add_generation_prompt,
+            )
+        )
+
+    def _choose_template_messages(self, messages, tools, template_kwargs) -> tuple[list[dict[str, Any]], str]:
         """Use OpenAI nested tool calls first, then flat Qwen-style calls as fallback."""
         try:
-            full_ids = _as_token_list(
-                self._apply_chat_template(messages, tools, template_kwargs, add_generation_prompt=False)
-            )
-            return messages, full_ids
+            self._render_token_ids(messages, tools, template_kwargs, add_generation_prompt=False)
+            return messages, "nested"
         except Exception as nested_exc:
             flat_messages = flatten_message_tool_calls(messages)
             try:
-                full_ids = _as_token_list(
-                    self._apply_chat_template(flat_messages, tools, template_kwargs, add_generation_prompt=False)
-                )
+                self._render_token_ids(flat_messages, tools, template_kwargs, add_generation_prompt=False)
                 logger.warning(
                     "SimpleSFTDataset fell back to flat tool_call shape after nested tool_call rendering failed: %s",
                     nested_exc,
                 )
-                return flat_messages, full_ids
+                return flat_messages, "flat"
             except Exception as flat_exc:
                 raise RuntimeError(
                     "Qwen chat-template rendering failed for both nested and flat tool_call shapes. "
@@ -273,25 +279,21 @@ class SimpleSFTDataset(Dataset):
         for assistant_index in assistant_indices:
             prefix_messages = messages[:assistant_index]
             if prefix_messages:
-                prefix_ids = _as_token_list(
-                    self._apply_chat_template(
-                        prefix_messages,
-                        tools,
-                        template_kwargs,
-                        add_generation_prompt=True,
-                    )
+                prefix_ids = self._render_token_ids(
+                    prefix_messages,
+                    tools,
+                    template_kwargs,
+                    add_generation_prompt=True,
                 )
                 prefix_len = len(prefix_ids)
             else:
                 prefix_len = 0
 
-            suffix_ids = _as_token_list(
-                self._apply_chat_template(
-                    messages[: assistant_index + 1],
-                    tools,
-                    template_kwargs,
-                    add_generation_prompt=False,
-                )
+            suffix_ids = self._render_token_ids(
+                messages[: assistant_index + 1],
+                tools,
+                template_kwargs,
+                add_generation_prompt=False,
             )
             suffix_len = len(suffix_ids)
 
@@ -353,7 +355,8 @@ class SimpleSFTDataset(Dataset):
             enable_thinking = bool(enable_thinking)
 
         template_kwargs = self._template_kwargs(enable_thinking)
-        messages, full_ids = self._choose_template_messages(messages, tools, template_kwargs)
+        messages, template_shape = self._choose_template_messages(messages, tools, template_kwargs)
+        full_ids = self._render_token_ids(messages, tools, template_kwargs, add_generation_prompt=False)
         loss_mask_values = self._assistant_loss_mask(messages, tools, template_kwargs, len(full_ids))
 
         input_ids = torch.tensor(full_ids, dtype=torch.long)
@@ -376,6 +379,8 @@ class SimpleSFTDataset(Dataset):
                 raise ValueError(f"Unknown truncation method {self.truncation}")
 
         report = self._audit_report(item, messages, input_ids.tolist(), loss_mask.tolist()) if audit else {}
+        if report:
+            report["template_shape"] = template_shape
         if audit and report["failures"]:
             raise AssertionError(f"SimpleSFTDataset audit failed for item {item}: {report['failures']}")
 
