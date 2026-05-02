@@ -99,6 +99,13 @@ Verified in the new repo:
 - Local Windows verification: `python -m py_compile` passed for the touched files; synthetic validator check confirmed the first real assistant/tool call receives the first thinking trace.
 - Next P5 action remains: pull latest main, run the thinking-stitching diagnostic on one real generated trajectory, then retry the tiny SFT export smoke.
 
+### 2026-05-02 Codex QC hardening after commit `d3a1837e`
+
+- Commit `7711222a` handles serialized empty `tool_calls=[]` on the stripped leading greeting, not only `tool_calls=None`.
+- `scripts/tau3/test_thinking_stitching.py` now asserts assistant-turn count equals `turns` count before checking per-turn thinking text, so shifted/missing thinking supervision fails loudly.
+- Local verification repeated: `python -m py_compile` passed; synthetic Tau3 trajectory check passed with leading greeting, `tool_calls=[]`, one tool-call assistant turn, and one final assistant turn.
+- Kiro/P5 should pull private `main` at or after `7711222a` before retrying the SFT smoke.
+
 ## Evidence Carried Forward
 
 From the old repo:
