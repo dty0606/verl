@@ -86,9 +86,26 @@ def apply_chat_template(
         )
     except Exception:
         # Qwen3.5 apply_chat_template needs messages with at least one user message
-        dummy_user_message = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
-        dummy_user_prefix = processor.apply_chat_template(
-            dummy_user_message,
+        # and enforces strict role ordering (system? → user → assistant → ...).
+        # When tokenizing a single non-user turn, we prepend a minimal valid
+        # conversation prefix and then strip it from the output.
+
+        # Build a minimal valid prefix that satisfies the template constraints.
+        # System messages must come first, so if our message IS a system message
+        # we only need a trailing dummy user. Otherwise we need a dummy user before
+        # the message.
+        if messages and messages[0].get("role") == "system":
+            # system message: append dummy user after it
+            dummy_prefix = messages + [{"role": "user", "content": ""}]
+            dummy_prefix_for_len = list(dummy_prefix)
+            full_messages = list(dummy_prefix)  # system + dummy_user
+        else:
+            dummy_prefix = [{"role": "user", "content": ""}]
+            dummy_prefix_for_len = list(dummy_prefix)
+            full_messages = dummy_prefix + messages
+
+        dummy_prefix_output = processor.apply_chat_template(
+            dummy_prefix_for_len,
             tokenize=tokenize,
             add_generation_prompt=False,
             tools=tools,
@@ -96,7 +113,7 @@ def apply_chat_template(
             **kwargs,
         )
         output = processor.apply_chat_template(
-            dummy_user_message + messages,
+            full_messages,
             tokenize=tokenize,
             add_generation_prompt=add_generation_prompt,
             tools=tools,
@@ -105,17 +122,17 @@ def apply_chat_template(
         )
 
         if not tokenize:  # tokenize=False
-            return output[len(dummy_user_prefix) :]
+            return output[len(dummy_prefix_output) :]
         elif not return_dict:  # tokenize=True and return_dict=False
             if isinstance(output[0], list):  # transformers>=5
                 assert len(output) == 1, "output must be a list[int] or list[list[int]]"
-                dummy_user_prefix = dummy_user_prefix[0]
+                dummy_prefix_output = dummy_prefix_output[0]
                 output = output[0]
-            return output[len(dummy_user_prefix) :]
+            return output[len(dummy_prefix_output) :]
         else:  # tokenize=True and return_dict=True and return_tensors="pt"
-            dummy_user_prefix = dict(dummy_user_prefix)
+            dummy_prefix_output = dict(dummy_prefix_output)
             output = dict(output)
-            prefix_len = dummy_user_prefix["input_ids"].shape[1]
+            prefix_len = dummy_prefix_output["input_ids"].shape[1]
             output["input_ids"] = output["input_ids"][:, prefix_len:]
             output["attention_mask"] = output["attention_mask"][:, prefix_len:]
             if "mm_token_type_ids" in output:

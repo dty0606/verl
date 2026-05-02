@@ -199,11 +199,14 @@ class MultiTurnSFTDataset(Dataset):
         """
         Process a single message and return its tokenized representation.
 
+        For models with strict chat templates (e.g. Qwen3.5) that validate
+        full conversation structure, we tokenize the conversation prefix up to
+        and including this message, then subtract the prefix up to the previous
+        message to get this message's tokens.
+
         Args:
             index: turn index in the conversation
             message: A single message dictionary
-            images: List of images to be used
-            videos: List of videos to be used
             tools: List of tools to be used
             enable_thinking: Whether to enable thinking mode
 
@@ -215,9 +218,12 @@ class MultiTurnSFTDataset(Dataset):
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
 
-        inputs = apply_chat_template(
+        # Tokenize conversation up to and including this message.
+        # This avoids Qwen3.5 chat template errors from passing a single
+        # tool/assistant message without the required conversation context.
+        prefix_with_current = apply_chat_template(
             processor,
-            messages=[message],
+            messages=full_message[: index + 1],
             tools=tools,
             add_generation_prompt=False,
             tokenize=True,
@@ -225,15 +231,30 @@ class MultiTurnSFTDataset(Dataset):
             return_tensors="pt",
             **apply_chat_template_kwargs,
         )
+        prefix_with_current = dict(prefix_with_current)
+        full_input_ids = prefix_with_current.pop("input_ids")[0]
+        full_attention_mask = prefix_with_current.pop("attention_mask")[0]
 
-        inputs = dict(inputs)
-        input_ids = inputs.pop("input_ids")[0]
-        attention_mask = inputs.pop("attention_mask")[0]
-
-        # remove system prompt if exists
-        if index != 0 and message["role"] != "system":
-            input_ids = input_ids[len(self.system_prompt) :]
-            attention_mask = attention_mask[len(self.system_prompt) :]
+        if index == 0:
+            input_ids = full_input_ids
+            attention_mask = full_attention_mask
+        else:
+            # Tokenize conversation up to (but not including) this message.
+            prefix_before = apply_chat_template(
+                processor,
+                messages=full_message[:index],
+                tools=tools,
+                add_generation_prompt=False,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                **apply_chat_template_kwargs,
+            )
+            prefix_before = dict(prefix_before)
+            prev_input_ids = prefix_before.pop("input_ids")[0]
+            prefix_len = len(prev_input_ids)
+            input_ids = full_input_ids[prefix_len:]
+            attention_mask = full_attention_mask[prefix_len:]
 
         if message["role"] == "assistant":
             loss_mask = torch.ones_like(attention_mask)
@@ -242,7 +263,7 @@ class MultiTurnSFTDataset(Dataset):
         else:
             loss_mask = torch.zeros_like(attention_mask)
 
-        return input_ids, loss_mask, attention_mask, inputs
+        return input_ids, loss_mask, attention_mask, prefix_with_current
 
     def _build_messages(self, example: dict):
         """Replace <image> and <video> placeholder in messages with corresponding image and video
@@ -309,7 +330,7 @@ class MultiTurnSFTDataset(Dataset):
                 index=i,
                 message=message,
                 full_message=messages,
-                tools=tools if i == 0 else None,
+                tools=tools,
                 enable_thinking=enable_thinking,
             )
             input_ids.append(_input_ids)
