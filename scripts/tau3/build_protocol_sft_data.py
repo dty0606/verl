@@ -164,6 +164,81 @@ def _messages_contain_reasoning_traces(messages: list[dict[str, Any]]) -> bool:
     return bool(re.search(r"<think\b|</think>", json.dumps(messages, ensure_ascii=False), flags=re.IGNORECASE))
 
 
+def _extract_assistant_thinking_content(content: Any) -> tuple[str, str]:
+    """Split a leading ``<think>...</think>`` block from assistant content."""
+    if not isinstance(content, str):
+        return "", "" if content is None else str(content)
+
+    match = re.match(r"\s*<think>\s*(.*?)\s*</think>\s*(.*)\Z", content, flags=re.DOTALL | re.IGNORECASE)
+    if not match:
+        return "", content
+    return match.group(1).strip(), match.group(2)
+
+
+def _strip_assistant_thinking(message: dict[str, Any]) -> dict[str, Any]:
+    """Remove historical reasoning from assistant messages used as context."""
+    copied = {k: v for k, v in message.items() if v is not None}
+    if copied.get("role") != "assistant":
+        return copied
+    thinking, remainder = _extract_assistant_thinking_content(copied.get("content"))
+    if thinking:
+        copied["content"] = remainder
+    copied.pop("thinking", None)
+    copied.pop("reasoning", None)
+    return copied
+
+
+def _assistant_message_to_answer(message: dict[str, Any]) -> dict[str, Any]:
+    """Convert one assistant message into an AReaL-style SFT target answer."""
+    content = message.get("content")
+    thinking, content_without_thinking = _extract_assistant_thinking_content(content)
+    answer: dict[str, Any] = {
+        "role": "assistant",
+        "content": content_without_thinking or "",
+        "thinking": thinking,
+    }
+    if message.get("tool_calls"):
+        answer["tool_calls"] = message["tool_calls"]
+    return answer
+
+
+def _expand_turn_sft_rows(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand one full trajectory into one row per non-greeting assistant turn."""
+    rows: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
+    seen_non_system = False
+
+    for message_index, message in enumerate(messages):
+        role = message.get("role")
+
+        # Tau3 traces include an assistant greeting before the first user turn.
+        # It is not a policy target and Qwen templates require user-first
+        # conversation structure after the optional system prompt.
+        is_leading_assistant_greeting = (
+            role == "assistant" and not seen_non_system and not message.get("tool_calls")
+        )
+        if role != "system":
+            seen_non_system = True
+        if is_leading_assistant_greeting:
+            continue
+
+        if role == "assistant":
+            answer = _assistant_message_to_answer(message)
+            if answer.get("thinking") or answer.get("content") or answer.get("tool_calls"):
+                rows.append(
+                    {
+                        "messages": [_strip_assistant_thinking(history_message) for history_message in history],
+                        "answer": answer,
+                        "source_message_index": message_index,
+                        "assistant_turn_index": len(rows),
+                    }
+                )
+
+        history.append(_strip_assistant_thinking(message))
+
+    return rows
+
+
 _FIRST_ASSISTANT_USER_ECHO_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("my_user_id", re.compile(r"\bmy user id\b", re.IGNORECASE)),
     ("my_name_is", re.compile(r"\bmy name is\b", re.IGNORECASE)),
@@ -312,8 +387,15 @@ def build_protocol_sft_dataset(
     include_system_prompt: bool = True,
     include_thinking_traces: bool = False,
     force_enable_thinking: bool = False,
+    sft_format: str = "trajectory",
+    max_rows_per_task: int | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
+    if sft_format not in {"trajectory", "turn"}:
+        raise ValueError(f"Unsupported sft_format: {sft_format}")
+    if max_rows_per_task is not None and max_rows_per_task < 1:
+        raise ValueError(f"max_rows_per_task must be >= 1 when set; got {max_rows_per_task}")
+
     out_dir = Path(output_dir).expanduser().resolve()
     if out_dir.exists() and not overwrite and any(out_dir.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {out_dir}")
@@ -433,30 +515,30 @@ def build_protocol_sft_dataset(
                     )
                     continue
 
-                row = {
-                    "messages": [{k: v for k, v in m.items() if v is not None} for m in messages],
+                common_audit_metadata = {
+                    "source_path": record.source_path,
+                    "source_index": record.source_index,
+                    "task_id": str(record.payload.get("task_id", "")),
+                    "sample_id": record.payload.get("sample_id"),
+                    "model": record.payload.get("model"),
+                    "domain": record.payload.get("domain", domain),
+                    "task_split": record.payload.get("task_split"),
+                    "final_reward": record.payload.get("final_reward"),
+                    "validation_reason": validation.reason,
+                    "validation_details": validation.details,
+                    "tool_names": validation.tool_names,
+                    "id_transform": variant_transform,
+                    "id_variant": id_variant,
+                    "source_enable_thinking": source_enable_thinking,
+                    "force_enable_thinking": force_enable_thinking,
+                    "chat_template_enable_thinking": row_enable_thinking,
+                    "thinking_supervision_mode": thinking_supervision_mode,
+                    "contains_reasoning_traces": contains_reasoning_traces,
+                }
+
+                base_row = {
                     "tools": tool_schemas,
                     "enable_thinking": row_enable_thinking,
-                    "audit_metadata": {
-                        "source_path": record.source_path,
-                        "source_index": record.source_index,
-                        "task_id": str(record.payload.get("task_id", "")),
-                        "sample_id": record.payload.get("sample_id"),
-                        "model": record.payload.get("model"),
-                        "domain": record.payload.get("domain", domain),
-                        "task_split": record.payload.get("task_split"),
-                        "final_reward": record.payload.get("final_reward"),
-                        "validation_reason": validation.reason,
-                        "validation_details": validation.details,
-                        "tool_names": validation.tool_names,
-                        "id_transform": variant_transform,
-                        "id_variant": id_variant,
-                        "source_enable_thinking": source_enable_thinking,
-                        "force_enable_thinking": force_enable_thinking,
-                        "chat_template_enable_thinking": row_enable_thinking,
-                        "thinking_supervision_mode": thinking_supervision_mode,
-                        "contains_reasoning_traces": contains_reasoning_traces,
-                    },
                     "source_path": record.source_path,
                     "source_index": record.source_index,
                     "task_id": str(record.payload.get("task_id", "")),
@@ -470,23 +552,67 @@ def build_protocol_sft_dataset(
                     "id_transform": variant_transform,
                     "id_variant": id_variant,
                 }
-                accepted_rows.append(row)
-                accepted_audit_rows.append(
-                    {
+
+                emitted_rows: list[dict[str, Any]]
+                if sft_format == "trajectory":
+                    emitted_rows = [
+                        {
+                            **base_row,
+                            "messages": [{k: v for k, v in m.items() if v is not None} for m in messages],
+                            "audit_metadata": {**common_audit_metadata, "sft_format": sft_format},
+                        }
+                    ]
+                else:
+                    turn_rows = _expand_turn_sft_rows([{k: v for k, v in m.items() if v is not None} for m in messages])
+                    if not turn_rows:
+                        rejected_rows.append(
+                            {
+                                **base_metadata,
+                                "accept": False,
+                                "validation_reason": "no_turn_sft_rows",
+                                "details": {"id_variant": id_variant},
+                            }
+                        )
+                        continue
+                    emitted_rows = []
+                    for turn_row in turn_rows:
+                        emitted_rows.append(
+                            {
+                                **base_row,
+                                "messages": turn_row["messages"],
+                                "answer": turn_row["answer"],
+                                "assistant_turn_index": turn_row["assistant_turn_index"],
+                                "source_message_index": turn_row["source_message_index"],
+                                "audit_metadata": {
+                                    **common_audit_metadata,
+                                    "sft_format": sft_format,
+                                    "assistant_turn_index": turn_row["assistant_turn_index"],
+                                    "source_message_index": turn_row["source_message_index"],
+                                },
+                            }
+                        )
+
+                accepted_rows.extend(emitted_rows)
+                for emitted_row in emitted_rows:
+                    accepted_audit_rows.append(
+                        {
                         **base_metadata,
                         "accept": True,
-                        "message_count": len(messages),
+                        "message_count": len(emitted_row["messages"]),
                         "tool_names": validation.tool_names,
                         "id_transform": variant_transform,
                         "id_variant": id_variant,
+                        "sft_format": sft_format,
+                        "assistant_turn_index": emitted_row.get("assistant_turn_index"),
+                        "source_message_index": emitted_row.get("source_message_index"),
                         "source_enable_thinking": source_enable_thinking,
                         "force_enable_thinking": force_enable_thinking,
                         "chat_template_enable_thinking": row_enable_thinking,
                         "thinking_supervision_mode": thinking_supervision_mode,
                         "contains_reasoning_traces": contains_reasoning_traces,
                         "details": validation.details,
-                    }
-                )
+                        }
+                    )
 
     if not accepted_rows:
         raise RuntimeError("No valid tau3 success trajectories were accepted.")
@@ -544,6 +670,28 @@ def build_protocol_sft_dataset(
                 "--train-only-holdout when intentionally building from train-split-only trajectories."
             )
 
+    if max_rows_per_task is not None:
+        def _cap_rows_per_task(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for row in rows:
+                grouped.setdefault(str(row["task_id"]), []).append(row)
+            capped_rows: list[dict[str, Any]] = []
+            for task_id, task_rows in sorted(grouped.items()):
+                ranked_rows = sorted(
+                    task_rows,
+                    key=lambda row: hashlib.sha256(
+                        (
+                            f"{id_seed}|{task_id}|{row.get('source_path')}|{row.get('source_index')}|"
+                            f"{row.get('sample_id')}|{row.get('id_variant')}|{row.get('assistant_turn_index', '')}"
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                )
+                capped_rows.extend(ranked_rows[:max_rows_per_task])
+            return capped_rows
+
+        train_rows = _cap_rows_per_task(train_rows)
+        test_rows = _cap_rows_per_task(test_rows)
+
     train_path = out_dir / "train.parquet"
     test_path = out_dir / "test.parquet"
     pd.DataFrame(train_rows).to_parquet(train_path, index=False)
@@ -557,6 +705,7 @@ def build_protocol_sft_dataset(
     manifest = {
         "manifest_version": 1,
         "dataset_type": "tau3_protocol_sft",
+        "sft_format": sft_format,
         "domain": domain,
         "id_transform": id_transform,
         "id_seed": id_seed,
@@ -565,6 +714,7 @@ def build_protocol_sft_dataset(
         "include_system_prompt": include_system_prompt,
         "dataset_config": {
             "messages_key": "messages",
+            "answer_key": "answer" if sft_format == "turn" else None,
             "tools_key": "tools",
             "enable_thinking_key": "enable_thinking",
         },
@@ -576,6 +726,7 @@ def build_protocol_sft_dataset(
         "filter_first_assistant_user_echo": filter_first_assistant_user_echo,
         "include_thinking_traces": include_thinking_traces,
         "force_enable_thinking": force_enable_thinking,
+        "max_rows_per_task": max_rows_per_task,
         "thinking_supervision_note": (
             "enable_thinking controls Qwen chat-template rendering. "
             "--include-thinking-traces stitches turns[].thinking_text into assistant messages as <think> blocks. "
@@ -593,6 +744,9 @@ def build_protocol_sft_dataset(
         "accepted_rows_containing_reasoning_traces": sum(
             1 for row in accepted_rows if row["audit_metadata"]["contains_reasoning_traces"]
         ),
+        "accepted_rows_per_task": dict(sorted(Counter(str(row["task_id"]) for row in accepted_rows).items())),
+        "train_rows_per_task": dict(sorted(Counter(str(row["task_id"]) for row in train_rows).items())),
+        "test_rows_per_task": dict(sorted(Counter(str(row["task_id"]) for row in test_rows).items())),
         "thinking_supervision_modes": dict(
             sorted(Counter(row["audit_metadata"]["thinking_supervision_mode"] for row in accepted_rows).items())
         ),
@@ -700,6 +854,24 @@ def main() -> None:
             "add supervised reasoning traces."
         ),
     )
+    parser.add_argument(
+        "--sft-format",
+        choices=["trajectory", "turn"],
+        default="trajectory",
+        help=(
+            "trajectory emits one full multi-turn row. turn emits one row per assistant target with "
+            "prior history in messages and current target in answer, matching AReaL tau2-style SFT."
+        ),
+    )
+    parser.add_argument(
+        "--max-rows-per-task",
+        type=int,
+        default=None,
+        help=(
+            "Optional deterministic cap applied after train/test split, useful for balancing turn-expanded "
+            "SFT rows across tau3 task ids."
+        ),
+    )
     parser.add_argument("--omit-system-prompt", action="store_true", help="Do not prepend the stored system prompt.")
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into a non-empty output directory.")
     args = parser.parse_args()
@@ -720,6 +892,8 @@ def main() -> None:
         include_system_prompt=not args.omit_system_prompt,
         include_thinking_traces=args.include_thinking_traces,
         force_enable_thinking=args.force_enable_thinking,
+        sft_format=args.sft_format,
+        max_rows_per_task=args.max_rows_per_task,
         overwrite=args.overwrite,
     )
     print(json.dumps(manifest, indent=2, ensure_ascii=False))

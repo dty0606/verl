@@ -5,7 +5,8 @@
 #   ./scripts/tau3/run_tau3_verl_sft_full_thinking.sh <dataset_dir> [experiment_suffix]
 #
 # The dataset directory must contain train.parquet and test.parquet with raw
-# multi-turn columns: messages, tools, and enable_thinking.
+# multi-turn columns. Preferred turn-level format has:
+# messages, answer, tools, and enable_thinking.
 
 set -euo pipefail
 
@@ -42,6 +43,7 @@ CMD=(
     "data.train_files=$TRAIN_FILE"
     "data.val_files=$VAL_FILE"
     "data.messages_key=messages"
+    "data.answer_key=${ANSWER_KEY:-answer}"
     "data.tools_key=tools"
     "data.enable_thinking_key=enable_thinking"
     "data.enable_thinking_default=True"

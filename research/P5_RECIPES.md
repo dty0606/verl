@@ -106,6 +106,16 @@ for split in ['train', 'test']:
 
 Goal: prove latest VERL can full-param SFT Qwen3.5-4B and export VLM-format HF checkpoint.
 
+The preferred SFT format is now turn-per-row, matching AReaL Tau2:
+
+```text
+messages = prior history
+answer   = current assistant target with thinking/content/tool_calls
+```
+
+This is required because Qwen3.5 strips historical assistant reasoning during
+full multi-turn chat-template rendering.
+
 Before the smoke, audit real parquet rows against the Qwen3.5 chat template:
 
 ```bash
@@ -116,11 +126,12 @@ python3 scripts/qwen35/diagnose_tau3_sft_template.py \
   --model Qwen/Qwen3.5-4B \
   --split train \
   --max-rows 20 \
-  --max-length 4096
+  --max-length 32768 \
+  --format turn
 ```
 
-Stop if this fails. The audit must show nonempty assistant masked spans containing
-expected `<think>` traces and tool names for tool-call turns.
+Stop if this fails. The audit must show exactly one target masked span per row
+with expected `<think>` traces and tool names for tool-call turns.
 
 ### 2a. Build a tiny SFT dataset (if 10K generation not yet done)
 
@@ -134,9 +145,11 @@ python3 scripts/tau3/build_protocol_sft_data.py \
   --output-dir datasets/tau3_sft_thinking_train_only \
   --train-only-holdout \
   --include-thinking-traces \
+  --sft-format turn \
   --id-transform randomize \
   --id-variants 3 \
   --include-original-id-variant \
+  --max-rows-per-task 1000 \
   --overwrite
 
 # Option B: for smoke only, use a tiny subset
@@ -161,8 +174,8 @@ MICRO_BATCH_SIZE_PER_GPU=1 \
 bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
   datasets/tau3_sft_thinking_train_only \
   qwen35_4b_vlm_export_smoke \
-  +data.custom_cls.path=verl/utils/dataset/simple_sft_dataset.py \
-  +data.custom_cls.name=SimpleSFTDataset \
+  +data.custom_cls.path=verl/utils/dataset/turn_sft_dataset.py \
+  +data.custom_cls.name=TurnSFTDataset \
   +data.audit_samples=2 \
   > logs/sft_vlm_export_smoke.log 2>&1
 ```
@@ -349,6 +362,9 @@ USE_LIGER=true \
 bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
   datasets/tau3_sft_thinking_train_only \
   qwen35_4b_vlm_sft_10k \
+  +data.custom_cls.path=verl/utils/dataset/turn_sft_dataset.py \
+  +data.custom_cls.name=TurnSFTDataset \
+  +data.audit_samples=2 \
   > logs/sft_full_10k.log 2>&1 &
 ```
 

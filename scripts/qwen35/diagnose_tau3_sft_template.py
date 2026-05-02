@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Audit Tau3 SFT parquet rows against the Qwen3.5 chat template.
 
-This is a pre-flight check for SimpleSFTDataset. It renders real rows,
-normalizes tool-call arguments to mappings, builds assistant loss masks, and
-fails if masked spans do not contain expected thinking/tool-call content.
+This is a pre-flight check for Qwen3.5 SFT rows. It supports both the
+legacy full-trajectory SimpleSFTDataset and the preferred turn-per-row
+TurnSFTDataset format.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from verl.utils.dataset.simple_sft_dataset import SimpleSFTDataset  # noqa: E402
+from verl.utils.dataset.turn_sft_dataset import TurnSFTDataset  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-rows", type=int, default=20, help="Number of rows to audit.")
     parser.add_argument("--max-length", type=int, default=4096, help="Max sequence length used by the dataset.")
     parser.add_argument("--audit-max-chars", type=int, default=800, help="Max decoded chars per assistant span.")
+    parser.add_argument(
+        "--format",
+        choices=["auto", "trajectory", "turn"],
+        default="auto",
+        help="Audit format. auto selects turn format when the parquet has an answer column.",
+    )
     return parser.parse_args()
 
 
@@ -43,7 +50,39 @@ def main() -> None:
         raise FileNotFoundError(f"Missing parquet file: {dataset_path}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    config = OmegaConf.create(
+    import pandas as pd
+
+    preview = pd.read_parquet(dataset_path, columns=None)
+    sft_format = args.format
+    if sft_format == "auto":
+        sft_format = "turn" if "answer" in preview.columns else "trajectory"
+
+    config_payload = {
+        "messages_key": "messages",
+        "tools_key": "tools",
+        "enable_thinking_key": "enable_thinking",
+        "enable_thinking_default": True,
+        "pad_mode": "no_padding",
+        "max_length": args.max_length,
+        "truncation": "error",
+        "audit_max_chars": args.audit_max_chars,
+    }
+    if sft_format == "turn":
+        config_payload["answer_key"] = "answer"
+
+    config = OmegaConf.create(config_payload)
+    dataset_cls = TurnSFTDataset if sft_format == "turn" else SimpleSFTDataset
+    dataset = dataset_cls(
+        parquet_files=[str(dataset_path)],
+        tokenizer=tokenizer,
+        config=config,
+        processor=None,
+        max_samples=args.max_rows,
+    )
+    print(f"Template audit format: {sft_format}")
+
+    # Keep the old explicit config shape in comments for command readability.
+    _ = OmegaConf.create(
         {
             "messages_key": "messages",
             "tools_key": "tools",
@@ -54,13 +93,6 @@ def main() -> None:
             "truncation": "error",
             "audit_max_chars": args.audit_max_chars,
         }
-    )
-    dataset = SimpleSFTDataset(
-        parquet_files=[str(dataset_path)],
-        tokenizer=tokenizer,
-        config=config,
-        processor=None,
-        max_samples=args.max_rows,
     )
 
     failures = 0

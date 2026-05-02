@@ -120,6 +120,18 @@ Verified in the new repo:
 - Fixed `SimpleSFTDataset` to choose nested-vs-flat tool-call message shape once per row and reuse that same shape for full rendering and all assistant mask prefix/suffix renders.
 - Local verification repeated: `python -m py_compile`, `git diff --check`, and synthetic helper normalization check passed.
 
+### 2026-05-02 Turn-per-row SFT decision
+
+- P5 audit with `max_length=32768` proved the full-trajectory `SimpleSFTDataset` mask is structurally wrong for Qwen3.5 thinking-on SFT: Qwen3.5 strips historical assistant reasoning in full multi-turn renders, causing fewer masked spans than assistant turns and missing `<think>` content.
+- Public precedent check: `inclusionAI/AReaL-tau2-data` uses `messages` history plus one current `answer` target with `thinking` and `tool_calls`. VERL docs also document Qwen/QwQ/Qwen3 historical reasoning stripping.
+- Added `--sft-format turn` to `scripts/tau3/build_protocol_sft_data.py`, which expands each accepted trajectory into one row per assistant target:
+  - `messages`: prior history only, with historical assistant reasoning stripped.
+  - `answer`: current assistant target only, with `thinking`, `content`, and optional `tool_calls`.
+  - `assistant_turn_index` and `source_message_index`: provenance for audit/balancing.
+- Added `verl/utils/dataset/turn_sft_dataset.py`, a custom VERL SFT dataset that renders `messages` with `add_generation_prompt=True`, renders `messages + [answer]`, and masks only the answer suffix.
+- Added `research/literature/tau2_areal_sft_notes.md` to record the AReaL Tau2 precedent.
+- `research/P5_RECIPES.md` now uses `TurnSFTDataset` and `--sft-format turn` for SFT smoke/full SFT.
+
 ## Evidence Carried Forward
 
 From the old repo:
