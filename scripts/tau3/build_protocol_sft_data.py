@@ -107,11 +107,19 @@ def _iter_input_files(inputs: list[str], *, trajectory_only: bool = True) -> lis
         path = Path(raw_input).expanduser().resolve()
         if path.is_dir():
             if trajectory_only:
-                # Only scan trajectory subdirectories
-                for traj_dir in sorted(path.rglob("trajectories")):
-                    if traj_dir.is_dir():
+                # Prefer trajectory subdirectories so run-level summary/config
+                # JSON files do not become noisy rejected candidates. Also
+                # support passing a trajectories/ directory directly or a
+                # flat smoke-test directory containing selected trajectory files.
+                traj_dirs = [path] if path.name == "trajectories" else []
+                traj_dirs.extend(traj_dir for traj_dir in sorted(path.rglob("trajectories")) if traj_dir.is_dir())
+                if traj_dirs:
+                    for traj_dir in traj_dirs:
                         paths.extend(sorted(traj_dir.glob("*.json")))
                         paths.extend(sorted(traj_dir.glob("*.jsonl")))
+                else:
+                    paths.extend(sorted(path.glob("*.json")))
+                    paths.extend(sorted(path.glob("*.jsonl")))
             else:
                 paths.extend(sorted(path.rglob("*.json")))
                 paths.extend(sorted(path.rglob("*.jsonl")))
