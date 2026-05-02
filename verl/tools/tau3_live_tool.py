@@ -41,13 +41,14 @@ class Tau3LiveTool(BaseTool):
 
         runtime = tau3_runtime_mode(
             getattr(agent_data, "interaction_kwargs", {}).get("runtime")
+            or getattr(getattr(agent_data, "interaction", None), "runtime", None)
             or self.runtime
             or os.environ.get("TAU3_LIVE_RUNTIME", "proxy_legacy")
         )
         manager = _select_manager(runtime)
 
         result = manager.execute_tool(
-            request_id=agent_data.request_id,
+            request_id=getattr(agent_data, "interaction_instance_id", None) or agent_data.request_id,
             tool_name=self.name,
             arguments=parameters,
         )

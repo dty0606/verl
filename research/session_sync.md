@@ -42,6 +42,7 @@ The intended path is:
 - `run_local_tau3_grpo_live_p5.sh` is the current runnable RL baseline entrypoint.
 - `run_local_tau3_sdpo_live_p5.sh` intentionally fails fast until vanilla SDPO is ported through latest VERL's distillation stack.
 - Full-parameter thinking SFT should use latest VERL's native SFT trainer, not the old TRL script path.
+- 2026-05-02 QC patch: interaction config is optional-safe for non-Tau3 `tool_agent` configs, Tau3 tool/session runtime routing now follows the active interaction manager, launch scripts are executable, and protocol-SFT building now rejects missing thinking traces and canonical test-task validation by default.
 
 ## Evidence Carried Forward
 

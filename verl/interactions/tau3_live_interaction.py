@@ -56,6 +56,7 @@ class Tau3LiveInteraction(BaseInteraction):
         if instance_id is None:
             instance_id = str(uuid4())
 
+        kwargs.pop("name", None)
         selected_runtime = tau3_runtime_mode(runtime or kwargs.pop("runtime", None) or self.runtime)
         manager = _select_manager(selected_runtime)
 

@@ -124,9 +124,10 @@ def _build_pred(parsed_ground_truth: dict[str, Any], live_result: dict[str, Any]
 def _feedback_mode(extra_info: dict[str, Any] | None) -> str:
     extra_info = extra_info or {}
     return normalize_feedback_mode(
-        extra_info.get("teacher_feedback_format")
+        os.environ.get("TAU3_LIVE_FEEDBACK_FORMAT")
+        or extra_info.get("teacher_feedback_format")
         or extra_info.get("feedback_mode")
-        or os.environ.get("TAU3_LIVE_FEEDBACK_FORMAT", "json")
+        or "json"
     )
 
 

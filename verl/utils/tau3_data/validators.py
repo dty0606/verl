@@ -215,6 +215,15 @@ def _build_thinking_text_map(candidate: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _has_leading_assistant_greeting(messages: Sequence[Mapping[str, Any]]) -> bool:
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            continue
+        return role == "assistant"
+    return False
+
+
 def extract_messages_for_sft(
     candidate: Mapping[str, Any],
     *,
@@ -225,9 +234,8 @@ def extract_messages_for_sft(
     if messages is None:
         raise ValueError("Candidate does not contain structured messages.")
 
-    # Build thinking-text lookup when requested.
-    # turns[i].thinking_text aligns with the (i+1)-th assistant message in
-    # simulation_run.messages because messages[0] is the environment greeting.
+    # Build thinking-text lookup when requested. Simulation traces include a
+    # leading assistant greeting, but direct message lists may start with user.
     thinking_texts: list[str] = []
     if include_thinking_traces:
         thinking_texts = _build_thinking_text_map(candidate)
@@ -240,8 +248,8 @@ def extract_messages_for_sft(
         if not (isinstance(first_message, Mapping) and first_message.get("role") == "system"):
             normalized_messages.append({"role": "system", "content": system_prompt})
 
-    # Track which agent turn we are on (skip the environment greeting).
-    agent_turn_index = -1  # will become 0 on the second assistant message
+    skip_first_assistant_for_thinking = _has_leading_assistant_greeting(messages)
+    assistant_message_index = -1
 
     for message in messages:
         role = message.get("role")
@@ -252,18 +260,19 @@ def extract_messages_for_sft(
         tool_calls = message.get("tool_calls")
 
         if role == "assistant":
-            agent_turn_index += 1
+            assistant_message_index += 1
 
-        # Resolve thinking text for this assistant turn (index 0 is the
-        # greeting which has no corresponding turns entry).
+        # Resolve thinking text for this assistant turn. Greeting-style traces
+        # skip the first assistant message; direct message lists do not.
         thinking_prefix = ""
+        thinking_index = assistant_message_index - (1 if skip_first_assistant_for_thinking else 0)
         if (
             include_thinking_traces
             and role == "assistant"
-            and agent_turn_index >= 1
-            and (agent_turn_index - 1) < len(thinking_texts)
+            and thinking_index >= 0
+            and thinking_index < len(thinking_texts)
         ):
-            tt = thinking_texts[agent_turn_index - 1]
+            tt = thinking_texts[thinking_index]
             if tt:
                 thinking_prefix = f"<think>\n{tt}\n</think>\n"
 

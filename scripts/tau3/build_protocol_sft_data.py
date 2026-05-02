@@ -307,6 +307,7 @@ def build_protocol_sft_dataset(
     split_manifest: str | None = None,
     val_fraction: float = 0.1,
     train_only_holdout: bool = False,
+    allow_canonical_test_validation: bool = False,
     filter_first_assistant_user_echo: bool = True,
     include_system_prompt: bool = True,
     include_thinking_traces: bool = False,
@@ -381,16 +382,6 @@ def build_protocol_sft_dataset(
                 continue
 
             source_enable_thinking = _bool_enable_thinking(record.payload)
-            row_enable_thinking = True if (force_enable_thinking or include_thinking_traces) else source_enable_thinking
-            thinking_supervision_mode = (
-                "source_thinking_traces"
-                if include_thinking_traces and source_enable_thinking
-                else (
-                    "template_override_only"
-                    if force_enable_thinking
-                    else ("source_thinking_metadata" if source_enable_thinking else "non_thinking")
-                )
-            )
 
             for id_variant, variant_transform, variant_index in id_variant_specs:
                 try:
@@ -401,6 +392,33 @@ def build_protocol_sft_dataset(
                         record_key=f"{key}::variant={id_variant}",
                     )
                     contains_reasoning_traces = _messages_contain_reasoning_traces(messages)
+                    if include_thinking_traces and not contains_reasoning_traces:
+                        rejected_rows.append(
+                            {
+                                **base_metadata,
+                                "accept": False,
+                                "validation_reason": "missing_thinking_traces",
+                                "details": {
+                                    "id_variant": id_variant,
+                                    "source_enable_thinking": source_enable_thinking,
+                                    "force_enable_thinking": force_enable_thinking,
+                                },
+                            }
+                        )
+                        continue
+
+                    row_enable_thinking = bool(
+                        force_enable_thinking or contains_reasoning_traces or source_enable_thinking
+                    )
+                    thinking_supervision_mode = (
+                        "source_thinking_traces"
+                        if include_thinking_traces and contains_reasoning_traces
+                        else (
+                            "template_override_only"
+                            if force_enable_thinking
+                            else ("source_thinking_metadata" if source_enable_thinking else "non_thinking")
+                        )
+                    )
                 except Exception as exc:  # noqa: BLE001
                     rejected_rows.append(
                         {
@@ -488,6 +506,13 @@ def build_protocol_sft_dataset(
     test_rows = [row for row in accepted_rows if str(row["task_id"]) in test_ids]
     held_out_rows = [row for row in accepted_rows if str(row["task_id"]) not in train_ids | test_ids]
 
+    if split_manifest and test_rows and not allow_canonical_test_validation:
+        raise RuntimeError(
+            f"Refusing to use {len(test_rows)} canonical test-task trajectory row(s) as SFT validation. "
+            "Build SFT data from train-split trajectories and pass --train-only-holdout, or pass "
+            "--allow-canonical-test-validation only for non-claim/debug runs."
+        )
+
     if held_out_rows:
         rejected_rows.extend(
             {
@@ -547,6 +572,7 @@ def build_protocol_sft_dataset(
         "split_manifest": split_manifest,
         "val_fraction": val_fraction,
         "train_only_holdout": train_only_holdout,
+        "allow_canonical_test_validation": allow_canonical_test_validation,
         "filter_first_assistant_user_echo": filter_first_assistant_user_echo,
         "include_thinking_traces": include_thinking_traces,
         "force_enable_thinking": force_enable_thinking,
@@ -641,6 +667,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--allow-canonical-test-validation",
+        action="store_true",
+        help=(
+            "Permit manifest test-task trajectories to become test.parquet. "
+            "Use only for smoke/debug runs; final SFT should use train-only trajectories plus --train-only-holdout."
+        ),
+    )
+    parser.add_argument(
         "--allow-first-assistant-user-echo",
         action="store_true",
         help=(
@@ -654,7 +688,7 @@ def main() -> None:
         help=(
             "Stitch turns[].thinking_text from trajectory data into assistant messages as "
             "<think>...</think> blocks. Requires trajectories generated with thinking enabled. "
-            "Automatically sets enable_thinking=True in the parquet output."
+            "Rows without stitched reasoning traces are rejected."
         ),
     )
     parser.add_argument(
@@ -681,6 +715,7 @@ def main() -> None:
         split_manifest=args.split_manifest or None,
         val_fraction=args.val_fraction,
         train_only_holdout=args.train_only_holdout,
+        allow_canonical_test_validation=args.allow_canonical_test_validation,
         filter_first_assistant_user_echo=not args.allow_first_assistant_user_echo,
         include_system_prompt=not args.omit_system_prompt,
         include_thinking_traces=args.include_thinking_traces,

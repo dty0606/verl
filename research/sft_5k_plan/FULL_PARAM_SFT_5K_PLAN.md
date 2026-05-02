@@ -53,7 +53,7 @@ python scripts/tau3/build_protocol_sft_data.py \
   --overwrite
 ```
 
-The builder defaults to `datasets/tau3_live_airline_canonical_split.json`, so canonical test task IDs stay held out unless explicitly overridden.
+The builder defaults to `datasets/tau3_live_airline_canonical_split.json` and refuses canonical test-task rows by default. Use train-split-only trajectory roots with `--train-only-holdout`; `--allow-canonical-test-validation` is for smoke/debug runs only.
 
 ## Training Defaults
 

@@ -41,6 +41,20 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _config_get(config: Any, key: str, default: Any = None) -> Any:
+    """Read optional DictConfig/plain-object keys without crashing on missing fields."""
+    if config is None:
+        return default
+    try:
+        if hasattr(config, "get"):
+            value = config.get(key, default)
+        else:
+            value = getattr(config, key)
+    except Exception:
+        return default
+    return default if value is None else value
+
+
 class AgentState(Enum):
     PENDING = "pending"
     GENERATING = "generating"
@@ -115,7 +129,7 @@ class ToolAgentLoop(AgentLoopBase):
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
 
-        self.interaction_config_file = self.rollout_config.multi_turn.interaction_config_path
+        self.interaction_config_file = _config_get(self.rollout_config.multi_turn, "interaction_config_path")
         self.interaction_map = (
             initialize_interactions_from_config(self.interaction_config_file) if self.interaction_config_file else {}
         )
@@ -191,7 +205,7 @@ class ToolAgentLoop(AgentLoopBase):
         finally:
             if agent_data.interaction is not None:
                 interaction_id = agent_data.interaction_instance_id or agent_data.request_id
-                await agent_data.interaction.finalize_interaction(interaction_id)
+                await agent_data.interaction.finalize_interaction(interaction_id, **agent_data.interaction_kwargs)
 
         # Finalize output
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
