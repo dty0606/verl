@@ -36,6 +36,8 @@ The intended path is:
 ## Current Migration Status
 
 - Latest-VERL fork and branch are active at `D:/AI/chatgpt/codex/tmp/verl_tau3_sdpo`.
+- Private remote for Kiro/P5 fresh clones: `https://github.com/dty0606/verl_tau3_sdpo.git`.
+- Fresh Kiro/P5 onboarding starts with `START_HERE_FOR_KIRO.md`; clone both the old archive repo and this new private execution repo.
 - Minimal Tau3 runtime files, tool schema, action parser, feedback/reward scorer, and migration docs have been copied into this fork.
 - Latest VERL's built-in `tool_agent` now has an optional Tau3 interaction path through `multi_turn.interaction_config_path`.
 - `tau3_qwen` tool parsing is registered for Qwen XML and legacy JSON tool-call outputs.
@@ -44,6 +46,7 @@ The intended path is:
 - Full-parameter thinking SFT should use latest VERL's native SFT trainer, not the old TRL script path.
 - 2026-05-02 QC patch: interaction config is optional-safe for non-Tau3 `tool_agent` configs, Tau3 tool/session runtime routing now follows the active interaction manager, launch scripts are executable, and protocol-SFT building now rejects missing thinking traces and canonical test-task validation by default.
 - 2026-05-02 checkpoint-format decision: use VLM-format `Qwen/Qwen3.5-4B` SFT export plus vLLM `--language-model-only`; do not depend on text-only `Qwen3_5ForCausalLM` checkpoints for RL rollout until upstream vLLM support is clearly merged and verified. See `research/migration/qwen35_vlm_sft_rl_implementation_plan.md`.
+- 2026-05-02 current external state: user is generating 10K thinking-on Tau3 SFT trajectories on P5. Treat generated trajectories/checkpoints/logs as S3 artifacts, not Git artifacts; promote only concise manifests/summaries into this repo.
 
 ## Evidence Carried Forward
 
