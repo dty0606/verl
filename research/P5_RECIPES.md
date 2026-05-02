@@ -106,6 +106,22 @@ for split in ['train', 'test']:
 
 Goal: prove latest VERL can full-param SFT Qwen3.5-4B and export VLM-format HF checkpoint.
 
+Before the smoke, audit real parquet rows against the Qwen3.5 chat template:
+
+```bash
+cd ~/verl_tau3_sdpo
+
+python3 scripts/qwen35/diagnose_tau3_sft_template.py \
+  datasets/tau3_sft_thinking_train_only \
+  --model Qwen/Qwen3.5-4B \
+  --split train \
+  --max-rows 20 \
+  --max-length 4096
+```
+
+Stop if this fails. The audit must show nonempty assistant masked spans containing
+expected `<think>` traces and tool names for tool-call turns.
+
 ### 2a. Build a tiny SFT dataset (if 10K generation not yet done)
 
 Use a handful of the old v1 thinking trajectories or a synthetic mini-set.
@@ -145,6 +161,9 @@ MICRO_BATCH_SIZE_PER_GPU=1 \
 bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
   datasets/tau3_sft_thinking_train_only \
   qwen35_4b_vlm_export_smoke \
+  +data.custom_cls.path=verl/utils/dataset/simple_sft_dataset.py \
+  +data.custom_cls.name=SimpleSFTDataset \
+  +data.audit_samples=2 \
   > logs/sft_vlm_export_smoke.log 2>&1
 ```
 

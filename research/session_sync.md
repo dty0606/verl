@@ -106,6 +106,15 @@ Verified in the new repo:
 - Local verification repeated: `python -m py_compile` passed; synthetic Tau3 trajectory check passed with leading greeting, `tool_calls=[]`, one tool-call assistant turn, and one final assistant turn.
 - Kiro/P5 should pull private `main` at or after `7711222a` before retrying the SFT smoke.
 
+### 2026-05-02 Codex SimpleSFTDataset tool-call normalization patch
+
+- Patched `verl/utils/dataset/simple_sft_dataset.py` to normalize messages before Qwen chat-template rendering: strip `None` keys, strip leading assistant greeting, remove empty `tool_calls`, and coerce assistant `tool_calls[].function.arguments` from JSON string to dict for training-template rendering.
+- Added nested OpenAI-style tool-call rendering first, with flat Qwen-style fallback if the nested shape fails.
+- Added `SimpleSFTDataset.audit_item()` plus `data.audit_samples` support to decode masked assistant spans and fail if expected `<think>` or tool names are missing.
+- Added `scripts/qwen35/diagnose_tau3_sft_template.py` as a pre-SFT parquet/template audit for 10-20 real rows.
+- Local Windows verification: `python -m py_compile` passed for the patched dataset and diagnostic script; synthetic helper check confirmed assistant greeting strip and JSON-string tool arguments -> dict normalization. P5 remains the source of truth for Qwen3.5 tokenizer/runtime behavior.
+- Next P5 action: run the diagnostic script on `datasets/tau3_sft_thinking_train_only`; only if it passes, retry tiny SFT smoke with `+data.custom_cls.path=verl/utils/dataset/simple_sft_dataset.py`, `+data.custom_cls.name=SimpleSFTDataset`, and `+data.audit_samples=2`.
+
 ## Evidence Carried Forward
 
 From the old repo:
