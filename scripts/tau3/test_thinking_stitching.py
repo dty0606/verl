@@ -58,6 +58,9 @@ print(f"\n  Leading assistant greeting stripped: YES")
 
 # Verify thinking text aligns to real assistant turns, not shifted by the stripped greeting.
 thinking_texts = [str(turn.get("thinking_text") or "").strip() for turn in test_traj.get("turns", [])]
+assert len(asst_yes) == len(thinking_texts), (
+    f"Assistant/turn count mismatch after greeting strip: assistant={len(asst_yes)} turns={len(thinking_texts)}"
+)
 for i, (message, thinking_text) in enumerate(zip(asst_yes, thinking_texts, strict=False)):
     content = str(message.get("content", ""))
     if thinking_text:

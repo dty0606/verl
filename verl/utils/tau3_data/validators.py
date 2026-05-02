@@ -263,7 +263,7 @@ def extract_messages_for_sft(
             role == "assistant"
             and skip_first_assistant_for_thinking
             and not skipped_leading_greeting
-            and message.get("tool_calls") is None
+            and not message.get("tool_calls")
         ):
             skipped_leading_greeting = True
             continue
