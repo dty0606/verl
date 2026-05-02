@@ -274,10 +274,11 @@ def extract_messages_for_sft(
         if role == "assistant":
             assistant_message_index += 1
 
-        # Resolve thinking text for this assistant turn. Greeting-style traces
-        # skip the first assistant message; direct message lists do not.
+        # Resolve thinking text for this assistant turn. If the raw trace had a
+        # greeting, it was dropped above, so kept assistant turns now align
+        # directly with the trajectory turns array.
         thinking_prefix = ""
-        thinking_index = assistant_message_index - (1 if skip_first_assistant_for_thinking else 0)
+        thinking_index = assistant_message_index
         if (
             include_thinking_traces
             and role == "assistant"

@@ -51,12 +51,22 @@ think_yes = sum(1 for m in asst_yes if "<think>" in str(m.get("content", "")))
 print(f"\nWith --include-thinking-traces:")
 print(f"  {len(msgs_yes)} msgs, {len(asst_yes)} assistant, {think_yes} with <think>")
 
-# Verify greeting has no thinking
-first_asst = next(m for m in msgs_yes if m.get("role") == "assistant")
-assert "<think>" not in str(first_asst.get("content", "")), "Greeting should NOT have <think>!"
-print(f"\n  Greeting clean: YES")
+# Verify the Tau3 assistant greeting was stripped for Qwen3.5 chat-template compatibility.
+first_non_system = next(m for m in msgs_yes if m.get("role") != "system")
+assert first_non_system.get("role") == "user", f"First non-system role must be user, got {first_non_system.get('role')}"
+print(f"\n  Leading assistant greeting stripped: YES")
 
-# Show first 3 agent assistant messages (skip greeting)
+# Verify thinking text aligns to real assistant turns, not shifted by the stripped greeting.
+thinking_texts = [str(turn.get("thinking_text") or "").strip() for turn in test_traj.get("turns", [])]
+for i, (message, thinking_text) in enumerate(zip(asst_yes, thinking_texts, strict=False)):
+    content = str(message.get("content", ""))
+    if thinking_text:
+        assert thinking_text in content, f"thinking_text[{i}] missing from assistant[{i}] content"
+    else:
+        assert "<think>" not in content, f"assistant[{i}] unexpectedly has <think> for empty thinking_text"
+print("  Thinking trace alignment: YES")
+
+# Show first 3 agent assistant messages.
 agent_assts = [m for m in asst_yes if "<think>" in str(m.get("content", ""))]
 for i, m in enumerate(agent_assts[:3]):
     content = str(m.get("content", ""))[:400]
@@ -64,7 +74,7 @@ for i, m in enumerate(agent_assts[:3]):
     print(f"\n  agent_assistant[{i}]: tool_calls={bool(tc)}")
     print(f"    content[:400]: {content!r}")
 
-# Sanity: same message count
+# Sanity: thinking traces should not alter message count.
 assert len(msgs_no) == len(msgs_yes), f"Message count changed: {len(msgs_no)} vs {len(msgs_yes)}"
 print(f"\n  Message count preserved: YES ({len(msgs_yes)})")
 print("\nALL CHECKS PASSED")

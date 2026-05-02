@@ -47,6 +47,7 @@ _flash_supports_window_size = False
 _flash_supports_deterministic = False
 _flash_use_top_left_mask = False
 
+
 def _ensure_flash_attn():
     global _flash_attn_loaded, _flash_supports_window_size, _flash_supports_deterministic, _flash_use_top_left_mask
     if _flash_attn_loaded:
@@ -207,6 +208,9 @@ def _custom_flash_attention_forward(
     """
     Patches flash attention forward to handle 3D position ids in mrope. (3, batch_size, seq_length)
     """
+    if not is_npu_available:
+        _ensure_flash_attn()
+
     # Assuming 4D tensors, key_states.shape[1] is the key/value sequence length (source length).
     use_sliding_windows = (
         _flash_supports_window_size and sliding_window is not None and key_states.shape[1] > sliding_window
@@ -238,6 +242,8 @@ def _custom_flash_attention_forward(
         position_ids = torch.cat(position_ids_lst, dim=-1)  # (batch_size, seq_length)
 
     if position_ids is not None and query_length != 1 and not (torch.diff(position_ids, dim=-1) >= 0).all():
+        if "flash_attn_varlen_func" not in globals():
+            raise ImportError("flash_attn_varlen_func is required for Qwen2-VL non-monotonic position ids.")
         batch_size = query_states.size(0)
         q, k, v, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k) = prepare_fa2_from_position_ids(
             query_states, key_states, value_states, position_ids

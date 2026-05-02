@@ -91,6 +91,14 @@ Verified in the new repo:
 - `examples/data_preprocess/tau3_live_multiturn.py` — reads canonical split manifest, builds train/test parquet
 - `research/P5_RECIPES.md` — updated with concrete smoke sequence commands
 
+### 2026-05-02 Codex follow-up patch after Kiro commit `08c34148`
+
+- Fixed thinking-trace alignment after stripping the leading Tau3 assistant greeting: kept assistant turns now map directly to `turns[*].thinking_text`.
+- Fixed Qwen2-VL lazy flash-attn import by invoking the lazy loader inside `_custom_flash_attention_forward` before flash-attn capability checks or varlen calls.
+- Updated `scripts/tau3/test_thinking_stitching.py` so the diagnostic checks user-first ordering and catches shifted thinking traces.
+- Local Windows verification: `python -m py_compile` passed for the touched files; synthetic validator check confirmed the first real assistant/tool call receives the first thinking trace.
+- Next P5 action remains: pull latest main, run the thinking-stitching diagnostic on one real generated trajectory, then retry the tiny SFT export smoke.
+
 ## Evidence Carried Forward
 
 From the old repo:
