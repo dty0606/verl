@@ -87,7 +87,14 @@ class CandidateRecord:
     source_index: int
 
 
-def _iter_input_files(inputs: list[str]) -> list[Path]:
+def _iter_input_files(inputs: list[str], *, trajectory_only: bool = True) -> list[Path]:
+    """Collect input files from paths, globs, or directories.
+
+    When *trajectory_only* is True (default) and a directory is given, only
+    files under ``*/trajectories/`` subdirectories are collected. This avoids
+    scanning summary.json, run_config.json, and other non-trajectory files
+    that would be rejected by the validator anyway.
+    """
     paths: list[Path] = []
     for raw_input in inputs:
         if any(token in raw_input for token in "*?[]"):
@@ -99,8 +106,15 @@ def _iter_input_files(inputs: list[str]) -> list[Path]:
 
         path = Path(raw_input).expanduser().resolve()
         if path.is_dir():
-            paths.extend(sorted(path.rglob("*.json")))
-            paths.extend(sorted(path.rglob("*.jsonl")))
+            if trajectory_only:
+                # Only scan trajectory subdirectories
+                for traj_dir in sorted(path.rglob("trajectories")):
+                    if traj_dir.is_dir():
+                        paths.extend(sorted(traj_dir.glob("*.json")))
+                        paths.extend(sorted(traj_dir.glob("*.jsonl")))
+            else:
+                paths.extend(sorted(path.rglob("*.json")))
+                paths.extend(sorted(path.rglob("*.jsonl")))
         elif path.is_file():
             paths.append(path)
         else:
