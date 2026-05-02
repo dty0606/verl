@@ -154,8 +154,11 @@ class TurnSFTDataset(Dataset):
         return kwargs
 
     def _render_token_ids(self, messages, tools, template_kwargs, *, add_generation_prompt=False) -> list[int]:
+        # Always use tokenizer for text-only SFT. The processor's
+        # apply_chat_template expects multimodal content blocks and crashes
+        # on plain string content.
         return _as_token_list(
-            self._processor.apply_chat_template(
+            self.tokenizer.apply_chat_template(
                 messages,
                 tools=tools,
                 add_generation_prompt=add_generation_prompt,
