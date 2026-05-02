@@ -339,3 +339,35 @@ class Qwen3XMLToolParser(ToolParser):
         except Exception as e:
             logger.exception(f"Error in extracting tool call from response: {e}")
             return text, []
+
+
+@ToolParser.register("tau3_qwen")
+class Tau3QwenToolParser(ToolParser):
+    """Tau3 parser that accepts Qwen XML tool calls and legacy JSON tool calls."""
+
+    def __init__(self, tokenizer):
+        super().__init__(tokenizer)
+        self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        del tools
+        from verl.utils.tau3_action_parser import extract_tool_name_and_arguments, parse_model_output_to_tau_action
+
+        loop = get_event_loop()
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=True),
+        )
+        parsed = parse_model_output_to_tau_action(text)
+        if parsed.action_type not in {"tool_json", "tool_qwen_xml"}:
+            return text, []
+
+        name, arguments = extract_tool_name_and_arguments(text, parsed.action_type)
+        if name is None:
+            return text, []
+
+        content = self.tool_call_regex.sub("", text).strip()
+        return content, [FunctionCall(name=name, arguments=json.dumps(arguments or {}, ensure_ascii=False))]
