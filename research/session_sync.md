@@ -43,6 +43,7 @@ The intended path is:
 - `run_local_tau3_sdpo_live_p5.sh` intentionally fails fast until vanilla SDPO is ported through latest VERL's distillation stack.
 - Full-parameter thinking SFT should use latest VERL's native SFT trainer, not the old TRL script path.
 - 2026-05-02 QC patch: interaction config is optional-safe for non-Tau3 `tool_agent` configs, Tau3 tool/session runtime routing now follows the active interaction manager, launch scripts are executable, and protocol-SFT building now rejects missing thinking traces and canonical test-task validation by default.
+- 2026-05-02 checkpoint-format decision: use VLM-format `Qwen/Qwen3.5-4B` SFT export plus vLLM `--language-model-only`; do not depend on text-only `Qwen3_5ForCausalLM` checkpoints for RL rollout until upstream vLLM support is clearly merged and verified. See `research/migration/qwen35_vlm_sft_rl_implementation_plan.md`.
 
 ## Evidence Carried Forward
 
@@ -56,9 +57,9 @@ From the old repo:
 
 ## Open Questions
 
-- Does latest VERL SFT accept Qwen3.5 thinking traces and tau3 assistant-first conversations without local template hacks?
-- Can latest VERL and bundled/latest vLLM load Qwen3.5-4B text-only rollouts from a VERL SFT checkpoint without manual config surgery?
-- Can the current Tau3 interaction-enabled `tool_agent` pass a one-step official-gym GRPO rollout smoke on AWS?
+- Does latest VERL SFT accept Qwen3.5 thinking traces and tau3 assistant-first conversations without local template hacks on P5?
+- Can latest VERL export a VLM-format `hf_model` for Qwen3.5-4B SFT, with `model_type=qwen3_5` and `Qwen3_5ForConditionalGeneration` preserved?
+- Can vLLM serve that exact SFT export with `--language-model-only`, and can the current Tau3 interaction-enabled `tool_agent` pass a one-step official-gym GRPO rollout smoke on P5?
 - What exact SDPO implementation path should be used in latest VERL after GRPO works: adapt upstream on-policy distillation or implement a minimal vanilla SDPO target builder first?
 
 ## Guardrails
