@@ -434,7 +434,7 @@ def build_protocol_sft_dataset(
                     continue
 
                 row = {
-                    "messages": messages,
+                    "messages": [{k: v for k, v in m.items() if v is not None} for m in messages],
                     "tools": tool_schemas,
                     "enable_thinking": row_enable_thinking,
                     "audit_metadata": {

@@ -164,6 +164,12 @@ class MultiTurnSFTDataset(Dataset):
         # Extract messages list from dataframe
         self.messages = self.dataframe[self.messages_key].apply(convert_nested_value_to_list_recursive).tolist()
 
+        # Strip None-valued keys from message dicts. Parquet serialization fills
+        # missing struct fields with None (e.g. tool_calls=None on non-assistant
+        # messages), which breaks chat templates that check ``is defined``.
+        for i, conversation in enumerate(self.messages):
+            self.messages[i] = [{k: v for k, v in msg.items() if v is not None} for msg in conversation]
+
         # Extract tools list from dataframe
         if self.tools_key in self.dataframe.columns:
             self.tools = self.dataframe[self.tools_key].apply(convert_nested_value_to_list_recursive).tolist()

@@ -250,11 +250,23 @@ def extract_messages_for_sft(
 
     skip_first_assistant_for_thinking = _has_leading_assistant_greeting(messages)
     assistant_message_index = -1
+    skipped_leading_greeting = False
 
     for message in messages:
         role = message.get("role")
         if role not in VALID_MESSAGE_ROLES:
             raise ValueError(f"Unknown message role: {role}")
+
+        # Drop the leading assistant greeting (e.g. "Hi! How can I help you today?")
+        # because Qwen3.5 chat template requires user-first after system.
+        if (
+            role == "assistant"
+            and skip_first_assistant_for_thinking
+            and not skipped_leading_greeting
+            and message.get("tool_calls") is None
+        ):
+            skipped_leading_greeting = True
+            continue
 
         normalized: dict[str, Any] = {"role": role}
         tool_calls = message.get("tool_calls")
