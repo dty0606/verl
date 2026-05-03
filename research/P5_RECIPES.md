@@ -292,6 +292,184 @@ assistant `<think>`.
 
 ---
 
+## Recipe 5F: Real Full-Trajectory SFT (uncapped, 1 epoch, with timing probe)
+
+After Recipe 4F proves the 10-step path is stable end-to-end, run the real
+full-param SFT on all accepted successful trajectories. Do not reopen LoRA, do
+not switch back to text-only CausalLM checkpoints.
+
+### 5F-A. Build uncapped full-trajectory dataset
+
+Same as Recipe 1F but without `--max-rows-per-task` so every accepted
+trajectory becomes one SFT row.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+python3 scripts/tau3/build_protocol_sft_data.py \
+  --input ~/SDPO-qwen35/outputs/tau3_protocol_candidates_thinking_5k_b2 \
+  --input ~/SDPO-qwen35/outputs/tau3_protocol_candidates_thinking_5k \
+  --input ~/SDPO-qwen35/outputs/tau3_protocol_candidates_thinking_v1 \
+  --output-dir datasets/tau3_sft_full_traj \
+  --train-only-holdout \
+  --include-thinking-traces \
+  --sft-format trajectory \
+  --overwrite
+```
+
+Verify:
+
+```bash
+python3 - <<'PY'
+import json
+m = json.load(open("datasets/tau3_sft_full_traj/manifest.json"))
+print("train", m["train_rows"], "test", m["test_rows"])
+assert m["sft_format"] == "trajectory"
+assert m["accepted_rows_containing_reasoning_traces"] == m["accepted_rows"]
+# Expect roughly the number of successful trajectories from the generator pools
+assert m["train_rows"] >= 4000, f"unexpectedly small train set: {m['train_rows']}"
+print("PASS: full-traj uncapped dataset built")
+PY
+```
+
+Expected: ~8–9K train rows, ~1K test rows based on the ~9,198 successful
+thinking-on trajectories recorded in `session_sync.md`. If the count is much
+lower, re-check which generator pools are being passed in.
+
+### 5F-B. Pre-tokenize at full length
+
+Same as Recipe 2F, pointed at the uncapped dataset.
+
+```bash
+python3 scripts/tau3/pretokenize_full_traj_sft.py \
+  --input datasets/tau3_sft_full_traj \
+  --output datasets/tau3_sft_full_traj_pretok \
+  --model Qwen/Qwen3.5-4B \
+  --max-length 32768 \
+  --truncation error \
+  --workers 8 \
+  --audit-samples 10 \
+  2>&1 | tee logs/pretokenize_full_traj_sft.log
+```
+
+Pass criteria: `errors == 0`, `avg_labeled_tokens > 0`, `avg_assistant_count > 1`,
+`*.audit.jsonl` decoded spans include old `<think>` and tool names.
+
+### 5F-C. Run Recipe 3F on the uncapped dataset
+
+Before training, measure the exact token budget so we know the P90/P95 tail.
+
+```bash
+python3 scripts/tau3/analyze_full_traj_token_budget.py \
+  --dataset datasets/tau3_sft_full_traj_pretok \
+  --split both \
+  --model Qwen/Qwen3.5-4B \
+  --component-sample-rows 1000 \
+  --thresholds 4096 8192 16384 24576 32768 \
+  --output-json research/diagnostics/full_traj_token_budget_real.json \
+  2>&1 | tee logs/full_traj_token_budget_real.log
+```
+
+### 5F-D. Timing probe (20 steps, no epoch)
+
+Before committing to a full epoch, run 20 steps to check step time at the
+target batch/length. This is throw-away; no checkpoint export required.
+
+```bash
+REPORT_TO='["console"]' \
+MODEL_PATH=Qwen/Qwen3.5-4B \
+CHECKPOINT_SAVE_CONTENTS='["model","optimizer","extra"]' \
+NUM_GPUS=8 TOTAL_EPOCHS=1 SAVE_FREQ=20 TEST_FREQ=1000 \
+MAX_LENGTH=32768 MAX_TOKEN_LEN_PER_GPU=32768 \
+TRAIN_BATCH_SIZE=8 MICRO_BATCH_SIZE_PER_GPU=1 \
+USE_LIGER=true LR=1e-5 TRUNCATION=error \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
+  datasets/tau3_sft_full_traj_pretok \
+  qwen35_4b_vlm_full_traj_sft_timing_probe \
+  +data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
+  +data.custom_cls.name=PretokenizedSFTDataset \
+  engine.use_torch_compile=False \
+  model.use_fused_kernels=False \
+  trainer.total_training_steps=20 \
+  trainer.max_ckpt_to_keep=1 \
+  2>&1 | tee logs/sft_full_traj_timing_probe.log
+```
+
+Decision:
+
+- If average step time is **under ~120s**, proceed to full epoch (5F-E).
+  Ballpark full-epoch wall clock at `train_batch=8`, 9K rows: ~9000/8=1125
+  steps × 120s ≈ **37 hours** single pass.
+- If step time is **120–180s**, still proceed but prepare a LIMA-style fallback:
+  stratified subsample to ~5K trajectories × 2 epochs (same token budget, half
+  the wall clock).
+- If step time **> 180s**, stop and diagnose:
+  - Confirm `use_liger=True` in the log.
+  - Check if `MAX_LENGTH=32768` is forced vs dynamic bucketing.
+  - Consider `MICRO_BATCH_SIZE_PER_GPU=2` if memory allows.
+  - Fall back to stratified 5K × 2 epochs subsample.
+
+Do not skip this probe. The 10-step smoke used ~500 rows; step timing can shift
+when the dataset grows by 20×.
+
+### 5F-E. Full real SFT (1 epoch, uncapped)
+
+```bash
+REPORT_TO='["console","wandb"]' \
+MODEL_PATH=Qwen/Qwen3.5-4B \
+CHECKPOINT_SAVE_CONTENTS='["model","optimizer","extra","hf_model"]' \
+NUM_GPUS=8 TOTAL_EPOCHS=1 SAVE_FREQ=500 TEST_FREQ=500 \
+MAX_LENGTH=32768 MAX_TOKEN_LEN_PER_GPU=32768 \
+TRAIN_BATCH_SIZE=8 MICRO_BATCH_SIZE_PER_GPU=1 \
+USE_LIGER=true LR=1e-5 TRUNCATION=error \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
+  datasets/tau3_sft_full_traj_pretok \
+  qwen35_4b_vlm_full_traj_sft_real_9k \
+  +data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
+  +data.custom_cls.name=PretokenizedSFTDataset \
+  engine.use_torch_compile=False \
+  model.use_fused_kernels=False \
+  trainer.max_ckpt_to_keep=3 \
+  2>&1 | tee logs/sft_full_traj_real_9k.log
+```
+
+After the final export, patch the tokenizer:
+
+```bash
+export HF_CKPT=$(ls -d checkpoints/SDPO/tau3_verl_sft/*full_traj_sft_real_9k*/global_step_*/huggingface | tail -1)
+python3 scripts/qwen35/patch_chat_template_preserve_thinking.py "$HF_CKPT"
+echo "REAL_SFT_CKPT=$HF_CKPT"
+```
+
+Record `REAL_SFT_CKPT` in `research/session_sync.md`. Use this exact path for
+vLLM serve smoke, one-step GRPO smoke, one-step SDPO smoke, and the full
+Recipe 8 / Recipe 10 baselines.
+
+### 5F fallback: LIMA-style 5K × 2 epochs
+
+If the timing probe forces a subsample, build a stratified 5K subset that
+preserves task balance.
+
+```bash
+python3 scripts/tau3/curate_full_traj_subset.py \
+  --input datasets/tau3_sft_full_traj_pretok \
+  --output datasets/tau3_sft_full_traj_5k \
+  --target-rows 5000 \
+  --strata task_id \
+  --seed 0 \
+  --overwrite
+```
+
+Then run 5F-E pointing at `datasets/tau3_sft_full_traj_5k` with
+`TOTAL_EPOCHS=2`. Total token budget is identical to the 9K × 1 epoch case.
+
+Note: `curate_full_traj_subset.py` does not exist yet. Only write it if the
+timing probe forces this fallback.
+
+---
+
 ## Recipe 2: Audit Qwen3.5 Template
 
 Run before any SFT training. Validates that turn-per-row data renders correctly

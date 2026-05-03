@@ -254,6 +254,23 @@ Verified in the new repo:
 - Smoke verdict: GRPO and SDPO wiring both passed. GRPO had zero actor update because all rewards were zero; SDPO produced a finite nonzero feedback-driven update. These smokes prove engineering shape and feedback wiring, not model quality.
 - Remaining pre-claim checks: verify terminal official reward extraction in a short real-SFT smoke, assert or harden the `raw_prompt[-1]` user-task assumption, document that current SDPO is sampled-token reverse-KL rather than full top-k logit distillation, and pin identical GRPO/SDPO env snapshots for fair baseline runs.
 
+### 2026-05-03 Real full-trajectory SFT plan (post-Guardian)
+
+After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, not more code. Kiro added `Recipe 5F` to `research/P5_RECIPES.md`:
+
+- 5F-A: build uncapped full-trajectory dataset (drop `--max-rows-per-task`). Expect ~8-9K train rows from the ~9.2K accepted thinking-on trajectories.
+- 5F-B: pretokenize at `MAX_LENGTH=32768`, `--truncation error`, `--audit-samples 10`.
+- 5F-C: run Recipe 3F token-budget audit on the real dataset.
+- 5F-D: 20-step timing probe before committing to a full epoch:
+  - < ~120s/step -> proceed with 9K x 1 epoch (~37 hours single pass).
+  - 120-180s -> proceed but prepare LIMA-style 5K x 2 epoch fallback.
+  - > 180s -> stop; diagnose Liger/bucketing/microbatch=2 or fall back.
+- 5F-E: full 1-epoch SFT, export `hf_model`, patch tokenizer with `patch_chat_template_preserve_thinking.py`, record `REAL_SFT_CKPT` path in this file.
+- Post-SFT gate: VLM-format config check -> vLLM serve smoke -> one-step GRPO smoke -> one-step SDPO smoke with explicit record of whether `reprompt_sample_fraction` is in `(0.0, 1.0)` (mixed success) or pinned to 1.0 (all-fail branch).
+- Then launch Recipe 8 GRPO full baseline and Recipe 10 SDPO full baseline in parallel or back-to-back.
+- Shared full-run length defaults (`MAX_PROMPT_LENGTH=16384`, `MAX_RESPONSE_LENGTH=12288`, `MAX_MODEL_LEN=32768`) are upper bounds for RL rollout, not targets. They exist so `response_length/clip_ratio` can come down when trajectories need more room. On OOM, first step down to `MAX_MODEL_LEN=24576`, `MAX_RESPONSE_LENGTH=8192`; only then investigate microbatch or TP.
+- Codex is parked until after the first real full-traj SFT checkpoint exists. Deeper fidelity follow-ups deferred until vanilla baselines are in: rename SDPO `actor/ppo_kl` metric, assert `raw_prompt[-1]` user-task invariant, top-k logit SDPO variant.
+
 ## Evidence Carried Forward
 
 From the old repo:
