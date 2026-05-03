@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _as_flat_int_list(value, *, name: str, item: int) -> list[int]:
+    value = convert_nested_value_to_list_recursive(value)
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if not isinstance(value, list):
+        raise ValueError(f"{name} for item {item} must be a list, got {type(value).__name__}")
+    if any(isinstance(v, (list, tuple, dict)) for v in value):
+        raise ValueError(f"{name} for item {item} must be a flat 1-D list")
+    try:
+        return [int(v) for v in value]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} for item {item} contains non-integer values") from exc
+
+
 class PretokenizedSFTDataset(Dataset):
     """SFT dataset that reads pre-tokenized input_ids and loss_mask from parquet."""
 
@@ -59,8 +73,14 @@ class PretokenizedSFTDataset(Dataset):
         return len(self.dataframe)
 
     def __getitem__(self, item):
-        input_ids = list(self.input_ids_col[item])
-        loss_mask = list(self.loss_mask_col[item])
+        input_ids = _as_flat_int_list(self.input_ids_col[item], name="input_ids", item=item)
+        loss_mask = _as_flat_int_list(self.loss_mask_col[item], name="loss_mask", item=item)
+        if len(input_ids) != len(loss_mask):
+            raise ValueError(
+                f"input_ids/loss_mask length mismatch for item {item}: {len(input_ids)} vs {len(loss_mask)}"
+            )
+        if any(mask_value not in (0, 1) for mask_value in loss_mask):
+            raise ValueError(f"loss_mask for item {item} must be binary 0/1 values")
 
         seq_len = len(input_ids)
         if seq_len > self.max_length:
@@ -72,6 +92,15 @@ class PretokenizedSFTDataset(Dataset):
                 loss_mask = loss_mask[-self.max_length:]
             elif self.truncation == "error":
                 raise ValueError(f"Sequence length {seq_len} > max_length {self.max_length}")
+            else:
+                raise ValueError(f"Unknown truncation method {self.truncation}")
+
+        if loss_mask and loss_mask[0]:
+            # sft_loss shifts a flattened jagged mask. Never label the first
+            # token of a sample because there is no in-sample previous token.
+            loss_mask[0] = 0
+        if sum(loss_mask) <= 0:
+            raise ValueError(f"Empty loss mask for item {item} after truncation={self.truncation}")
 
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         loss_mask = torch.tensor(loss_mask, dtype=torch.long)

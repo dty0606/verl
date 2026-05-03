@@ -148,42 +148,119 @@ Pass criteria per row:
 
 ---
 
-## Recipe 3: Full SFT (9K trajectories, turn-per-row)
+## Recipe 3: Pre-Tokenize Turn SFT Data
 
-Run after audit passes. Uses all ~75K train rows, Liger for memory efficiency,
-batch 32 for speed.
+Run after audit passes. This moves Qwen3.5 chat-template work out of the
+training loop. Use left truncation if any row exceeds `MAX_LENGTH`, because the
+current assistant answer is at the end of the sequence.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+python3 scripts/tau3/pretokenize_turn_sft.py \
+  --input datasets/tau3_sft_thinking_train_only \
+  --output datasets/tau3_sft_pretokenized \
+  --model Qwen/Qwen3.5-4B \
+  --max-length 32768 \
+  --truncation left \
+  --workers 8 \
+  2>&1 | tee logs/pretokenize_turn_sft.log
+```
+
+Verify the manifest before training:
+
+```bash
+python3 - <<'PY'
+import json
+manifest = json.load(open("datasets/tau3_sft_pretokenized/manifest.json"))
+for split in ["train", "test"]:
+    stats = manifest.get(split, {})
+    print(split, stats)
+    assert stats.get("errors", 0) == 0, stats
+    assert stats.get("output_rows", 0) > 0, stats
+    assert stats.get("avg_labeled_tokens", 0) > 0, stats
+print("PASS: pre-tokenized dataset manifest is trainable")
+PY
+```
+
+**Stop if pre-tokenization reports errors or empty labeled-token stats.**
+
+The training-step/runtime estimate is in Recipe 5 below.
+
+---
+
+## Recipe 4: Two-Step Pre-Tokenized SFT Smoke
+
+This proves the data loader, Liger path, VLM checkpoint export, and dynamic
+batching without spending an epoch.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+REPORT_TO='["console"]' \
+MODEL_PATH=Qwen/Qwen3.5-4B \
+CHECKPOINT_SAVE_CONTENTS='["model","optimizer","extra","hf_model"]' \
+NUM_GPUS=8 TOTAL_EPOCHS=1 SAVE_FREQ=1 TEST_FREQ=1 \
+MAX_LENGTH=32768 MAX_TOKEN_LEN_PER_GPU=32768 \
+TRAIN_BATCH_SIZE=32 MICRO_BATCH_SIZE_PER_GPU=1 \
+USE_LIGER=true LR=1e-5 TRUNCATION=error \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
+  datasets/tau3_sft_pretokenized \
+  qwen35_4b_vlm_export_smoke_pretok \
+  data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
+  data.custom_cls.name=PretokenizedSFTDataset \
+  trainer.total_training_steps=2 \
+  trainer.max_ckpt_to_keep=1 \
+  2>&1 | tee logs/sft_vlm_export_smoke_pretok.log
+```
+
+Pass criteria:
+- Step time should improve dramatically versus on-the-fly `TurnSFTDataset`
+- Loss is finite and nonzero
+- A `huggingface/` checkpoint is saved
+
+**Stop if step time is still tens of seconds or the loss/mask path fails.**
+
+---
+
+## Recipe 5: Full Pre-Tokenized SFT Run
+
+Use all rows by default. Only rebuild with `--max-rows-per-task` if the build
+manifest shows severe task skew.
 
 ```bash
 cd ~/verl_tau3_sdpo
 
 MODEL_PATH=Qwen/Qwen3.5-4B \
 CHECKPOINT_SAVE_CONTENTS='["model","optimizer","extra","hf_model"]' \
-NUM_GPUS=8 \
-TOTAL_EPOCHS=1 \
-SAVE_FREQ=500 \
-TEST_FREQ=250 \
-MAX_LENGTH=32768 \
-MAX_TOKEN_LEN_PER_GPU=32768 \
-TRAIN_BATCH_SIZE=32 \
-MICRO_BATCH_SIZE_PER_GPU=1 \
-USE_LIGER=true \
-LR=1e-5 \
+NUM_GPUS=8 TOTAL_EPOCHS=1 SAVE_FREQ=1000 TEST_FREQ=1000 \
+MAX_LENGTH=32768 MAX_TOKEN_LEN_PER_GPU=32768 \
+TRAIN_BATCH_SIZE=32 MICRO_BATCH_SIZE_PER_GPU=1 \
+USE_LIGER=true LR=1e-5 TRUNCATION=error \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
 bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
-  datasets/tau3_sft_thinking_train_only \
-  qwen35_4b_vlm_sft_9k_turn \
-  +data.custom_cls.path=verl/utils/dataset/turn_sft_dataset.py \
-  +data.custom_cls.name=TurnSFTDataset \
-  +data.audit_samples=2 \
-  +data.truncation=right \
-  2>&1 | tee logs/sft_full_9k_turn.log
+  datasets/tau3_sft_pretokenized \
+  qwen35_4b_vlm_sft_9k_turn_pretok \
+  data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
+  data.custom_cls.name=PretokenizedSFTDataset \
+  trainer.max_ckpt_to_keep=2 \
+  2>&1 | tee logs/sft_full_9k_turn_pretok.log
 ```
+
+Expected: ~75,949 train rows / batch 32 = ~2,374 optimizer steps. Target
+runtime is 2-3 hours if pre-tokenized step time is healthy.
+
+If OOM or too slow:
+1. Confirm Liger is active in the log (`use_liger=True`)
+2. Try `TRAIN_BATCH_SIZE=16`
+3. Try `MAX_LENGTH=24576` as last resort, then re-run pre-tokenization
+
+<!-- legacy estimate superseded by Recipe 5 above
 
 Expected: ~2,374 steps, ~1-2 hours on 8×H100.
 
-If OOM:
-1. Confirm Liger is active in the log (`use_liger=True`)
-2. Try `TRAIN_BATCH_SIZE=16` (doubles steps to ~4,748)
-3. Try `MAX_LENGTH=24576` as last resort
+-->
 
 ### Verify VLM-format checkpoint
 
@@ -208,7 +285,7 @@ PY
 
 ---
 
-## Recipe 4: Standalone vLLM Serve Smoke
+## Recipe 6: Standalone vLLM Serve Smoke
 
 Prove the SFT export loads in vLLM before involving GRPO.
 
@@ -249,7 +326,7 @@ Pass: coherent English, no gibberish, no vision-encoder crash.
 
 ---
 
-## Recipe 5: One-Step GRPO Smoke
+## Recipe 7: One-Step GRPO Smoke
 
 Prove latest VERL can load the SFT checkpoint, run tau3 live interaction,
 and produce one nonzero actor update.
@@ -308,7 +385,7 @@ Pass criteria:
 
 ---
 
-## Recipe 6: Full GRPO Baseline
+## Recipe 8: Full GRPO Baseline
 
 Run only after SFT checkpoint passes vLLM serve + one-step GRPO smoke.
 
@@ -354,7 +431,7 @@ No LoRA. No `SFT_LORA_*` env vars. Full checkpoint loaded directly.
 
 ---
 
-## Recipe 7: Vanilla SDPO (not yet runnable)
+## Recipe 9: Vanilla SDPO (not yet runnable)
 
 `run_local_tau3_sdpo_live_p5.sh` intentionally fails fast.
 See `research/migration/sdpo_latest_verl_port_notes.md` for the port plan.

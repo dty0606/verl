@@ -132,6 +132,23 @@ Verified in the new repo:
 - Added `research/literature/tau2_areal_sft_notes.md` to record the AReaL Tau2 precedent.
 - `research/P5_RECIPES.md` now uses `TurnSFTDataset` and `--sft-format turn` for SFT smoke/full SFT.
 
+### 2026-05-02 Pre-tokenized turn SFT path
+
+- Kiro commit `d5bc3a13` added offline pre-tokenization for turn-per-row SFT after P5 showed on-the-fly `apply_chat_template` training at ~88 seconds/step.
+- `scripts/tau3/pretokenize_turn_sft.py` now writes `input_ids` and `loss_mask` parquet files for `PretokenizedSFTDataset`, so training does no chat-template rendering in the hot loop.
+- Codex QC hardening after `d5bc3a13`:
+  - Pre-tokenization fails fast on row errors unless `--allow-errors` is explicitly set.
+  - `left` truncation is implemented and is the default for offline pre-tokenization, preserving the current assistant answer at the sequence end.
+  - Empty loss masks after truncation are rejected.
+  - If truncation leaves `loss_mask[0] == 1`, the first label is dropped because latest VERL's no-padding SFT loss rolls the flattened jagged mask by one token.
+  - `PretokenizedSFTDataset` validates 1-D integer `input_ids`, binary `loss_mask`, equal lengths, non-empty labels, and unknown truncation modes.
+- Recommended next P5 sequence:
+  - Pre-tokenize full train-only turn dataset with `--max-length 32768 --truncation left --workers 8`.
+  - Verify `manifest.json` has `errors == 0`, nonzero `output_rows`, and nonzero `avg_labeled_tokens` for train/test.
+  - Run a 2-step pre-tokenized SFT smoke with `TRAIN_BATCH_SIZE=32`, `USE_LIGER=true`, `TRUNCATION=error`, and `trainer.total_training_steps=2`.
+  - If smoke step time is healthy and checkpoint export is VLM-format, train all rows for one epoch with `SAVE_FREQ=1000`, `TEST_FREQ=1000`, and no row cap.
+- Sampling decision: use all ~75,949 train turn rows by default. Only rebuild with `--max-rows-per-task` if the manifest shows severe task skew, e.g. one task contributes more than ~10-12% of train rows or max/median task count exceeds ~2.5x.
+
 ## Evidence Carried Forward
 
 From the old repo:

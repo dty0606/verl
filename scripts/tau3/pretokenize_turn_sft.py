@@ -20,7 +20,7 @@ import argparse
 import json
 import os
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -103,19 +103,44 @@ def _tokenize_row(row_dict: dict, tokenizer_path: str, max_length: int, truncati
     loss_mask = [0] * min(prompt_len, len(full_ids)) + [1] * max(0, len(full_ids) - prompt_len)
     loss_mask = loss_mask[:len(full_ids)]
 
-    seq_len = len(full_ids)
-    if seq_len > max_length:
+    original_seq_len = len(full_ids)
+    truncated = False
+    if original_seq_len > max_length:
         if truncation == "error":
-            return {"error": f"Sequence length {seq_len} > max_length {max_length}"}
+            return {"error": f"Sequence length {original_seq_len} > max_length {max_length}"}
         elif truncation == "right":
             full_ids = full_ids[:max_length]
             loss_mask = loss_mask[:max_length]
+            truncated = True
+        elif truncation == "left":
+            full_ids = full_ids[-max_length:]
+            loss_mask = loss_mask[-max_length:]
+            truncated = True
+        else:
+            return {"error": f"Unknown truncation method: {truncation}"}
+
+    if len(full_ids) != len(loss_mask):
+        return {"error": f"input_ids/loss_mask length mismatch: {len(full_ids)} vs {len(loss_mask)}"}
+    if loss_mask and loss_mask[0]:
+        # VERL SFT shifts the flattened loss mask by one token. A label on the
+        # first token of a jagged sample can cross sample boundaries, so drop it.
+        loss_mask[0] = 0
+    labeled_tokens = int(sum(loss_mask))
+    if labeled_tokens <= 0:
+        return {
+            "error": (
+                "Empty loss mask after tokenization/truncation. "
+                f"original_seq_len={original_seq_len}, max_length={max_length}, truncation={truncation}"
+            )
+        }
 
     return {
         "input_ids": full_ids,
         "loss_mask": loss_mask,
         "seq_len": len(full_ids),
-        "labeled_tokens": sum(loss_mask),
+        "original_seq_len": original_seq_len,
+        "labeled_tokens": labeled_tokens,
+        "truncated": truncated,
     }
 
 
@@ -135,14 +160,10 @@ def pretokenize_split(
 
     # Process rows — use multiprocessing for speed
     if workers > 1:
+        worker_args = ((row, tokenizer_path, max_length, truncation) for row in rows)
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(_tokenize_row, row, tokenizer_path, max_length, truncation): i
-                for i, row in enumerate(rows)
-            }
-            for future in tqdm(as_completed(futures), total=len(futures), desc=str(input_path.name)):
-                idx = futures[future]
-                result = future.result()
+            mapped = executor.map(_tokenize_row_from_args, worker_args, chunksize=16)
+            for idx, result in enumerate(tqdm(mapped, total=len(rows), desc=str(input_path.name))):
                 if result is None or "error" in result:
                     errors += 1
                     continue
@@ -177,6 +198,8 @@ def pretokenize_split(
         "avg_seq_len": np.mean([r[1]["seq_len"] for r in results]) if results else 0,
         "avg_labeled_tokens": np.mean([r[1]["labeled_tokens"] for r in results]) if results else 0,
         "max_seq_len": max(r[1]["seq_len"] for r in results) if results else 0,
+        "max_original_seq_len": max(r[1]["original_seq_len"] for r in results) if results else 0,
+        "truncated_rows": sum(1 for _, result in results if result.get("truncated")),
     }
     return stats
 
@@ -187,8 +210,14 @@ def main():
     parser.add_argument("--output", required=True, help="Output dir for pre-tokenized parquet")
     parser.add_argument("--model", default="Qwen/Qwen3.5-4B", help="Tokenizer model path")
     parser.add_argument("--max-length", type=int, default=32768)
-    parser.add_argument("--truncation", default="right", choices=["right", "left", "error"])
+    parser.add_argument(
+        "--truncation",
+        default="left",
+        choices=["right", "left", "error"],
+        help="Use left truncation to preserve the current assistant answer at the end of the sequence.",
+    )
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--allow-errors", action="store_true", help="Write output even if some rows fail tokenization.")
     args = parser.parse_args()
 
     input_dir = Path(args.input).expanduser()
@@ -206,6 +235,12 @@ def main():
         stats = pretokenize_split(input_path, output_path, args.model, args.max_length, args.truncation, args.workers)
         all_stats[split] = stats
         print(f"  {stats}")
+        if stats["errors"] and not args.allow_errors:
+            output_path.unlink(missing_ok=True)
+            raise SystemExit(
+                f"Pre-tokenization failed for {stats['errors']} {split} row(s). "
+                "Inspect the input data or rerun with --allow-errors only for debugging."
+            )
 
     manifest = {
         "source": str(input_dir),
@@ -217,6 +252,10 @@ def main():
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"\nManifest: {output_dir / 'manifest.json'}")
     print("Done.")
+
+
+def _tokenize_row_from_args(args):
+    return _tokenize_row(*args)
 
 
 if __name__ == "__main__":
