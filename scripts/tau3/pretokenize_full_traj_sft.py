@@ -70,6 +70,15 @@ def _extract_tool_name(tool_call: dict[str, Any]) -> str | None:
     return str(tool_call.get("name") or "") or None
 
 
+def _message_segment_type(message: dict[str, Any]) -> str:
+    role = str(message.get("role") or "")
+    if role != "assistant":
+        return role
+    if message.get("tool_calls"):
+        return "assistant_tool_call"
+    return "assistant_text"
+
+
 def _tokenize_row(row_dict: dict, tokenizer_path: str, max_length: int, truncation: str, audit: bool) -> dict:
     """Tokenize one full-trajectory row. Runs inside worker processes."""
 
@@ -124,14 +133,51 @@ def _tokenize_row(row_dict: dict, tokenizer_path: str, max_length: int, truncati
         template_shape = "flat"
         full_ids = render(messages)
 
+    message_boundaries: list[tuple[int, int]] = []
+    prefix_len = 0
+    for message_index in range(len(messages)):
+        suffix_len = len(render(messages[: message_index + 1], add_generation_prompt=False))
+        if suffix_len < prefix_len:
+            return {
+                "error": (
+                    "Non-monotonic prefix tokenization while building full-traj masks: "
+                    f"message_index={message_index}, prefix_len={prefix_len}, suffix_len={suffix_len}"
+                )
+            }
+        message_boundaries.append((prefix_len, suffix_len))
+        prefix_len = suffix_len
+
     assistant_indices = [index for index, message in enumerate(messages) if message.get("role") == "assistant"]
     loss_mask = [0] * len(full_ids)
     for assistant_index in assistant_indices:
-        prefix_messages = messages[:assistant_index]
-        prefix_len = len(render(prefix_messages, add_generation_prompt=True)) if prefix_messages else 0
-        suffix_len = len(render(messages[: assistant_index + 1], add_generation_prompt=False))
-        for token_index in range(prefix_len, min(suffix_len, len(loss_mask))):
+        start, end = message_boundaries[assistant_index]
+        for token_index in range(start, min(end, len(loss_mask))):
             loss_mask[token_index] = 1
+
+    segments: list[dict[str, Any]] = []
+    assistant_turn_index = -1
+    for message_index, message in enumerate(messages):
+        start, end = message_boundaries[message_index]
+        role = str(message.get("role") or "")
+        if role == "assistant":
+            assistant_turn_index += 1
+        tool_names = [
+            tool_name
+            for tool_call in (message.get("tool_calls") or [])
+            if (tool_name := _extract_tool_name(tool_call))
+        ]
+        segments.append(
+            {
+                "message_index": message_index,
+                "role": role,
+                "segment_type": _message_segment_type(message),
+                "assistant_turn_index": assistant_turn_index if role == "assistant" else None,
+                "token_start": start,
+                "token_end": end,
+                "loss": int(role == "assistant"),
+                "tool_names": tool_names,
+            }
+        )
 
     original_seq_len = len(full_ids)
     truncated = False
@@ -141,10 +187,29 @@ def _tokenize_row(row_dict: dict, tokenizer_path: str, max_length: int, truncati
         if truncation == "right":
             full_ids = full_ids[:max_length]
             loss_mask = loss_mask[:max_length]
+            segments = [
+                {
+                    **segment,
+                    "token_start": min(segment["token_start"], max_length),
+                    "token_end": min(segment["token_end"], max_length),
+                }
+                for segment in segments
+                if segment["token_start"] < max_length
+            ]
             truncated = True
         elif truncation == "left":
+            offset = original_seq_len - max_length
             full_ids = full_ids[-max_length:]
             loss_mask = loss_mask[-max_length:]
+            segments = [
+                {
+                    **segment,
+                    "token_start": max(0, segment["token_start"] - offset),
+                    "token_end": max(0, segment["token_end"] - offset),
+                }
+                for segment in segments
+                if segment["token_end"] > offset
+            ]
             truncated = True
         else:
             return {"error": f"Unknown truncation method: {truncation}"}
@@ -172,15 +237,30 @@ def _tokenize_row(row_dict: dict, tokenizer_path: str, max_length: int, truncati
         failures: list[str] = []
         if not truncated and len(spans) != len(assistant_messages):
             failures.append(f"assistant_span_count_mismatch: spans={len(spans)} assistants={len(assistant_messages)}")
-        for span_index, message in enumerate(assistant_messages[: len(decoded_spans)]):
-            decoded = decoded_spans[span_index]
+        for assistant_index, message in enumerate(assistant_messages):
+            decoded = ""
+            assistant_segment = next(
+                (
+                    segment
+                    for segment in segments
+                    if segment.get("role") == "assistant"
+                    and segment.get("assistant_turn_index") == assistant_index
+                    and segment["token_end"] > segment["token_start"]
+                ),
+                None,
+            )
+            if assistant_segment is not None:
+                decoded = tokenizer.decode(
+                    full_ids[assistant_segment["token_start"] : assistant_segment["token_end"]],
+                    skip_special_tokens=False,
+                )
             content = str(message.get("content") or "")
             if "<think" in content and "<think" not in decoded:
-                failures.append(f"missing_think_in_span_{span_index}")
+                failures.append(f"missing_think_in_span_{assistant_index}")
             for tool_call in message.get("tool_calls") or []:
                 tool_name = _extract_tool_name(tool_call)
                 if tool_name and tool_name not in decoded:
-                    failures.append(f"missing_tool_name_in_span_{span_index}: {tool_name}")
+                    failures.append(f"missing_tool_name_in_span_{assistant_index}: {tool_name}")
         audit_report = {
             "assistant_count": len(assistant_messages),
             "masked_span_count": len(spans),
@@ -201,6 +281,7 @@ def _tokenize_row(row_dict: dict, tokenizer_path: str, max_length: int, truncati
         "truncated": truncated,
         "template_shape": template_shape,
         "chat_template_sha256": preserve_thinking_template_sha256(),
+        "segments": segments,
         "audit_report": audit_report,
     }
 
@@ -259,6 +340,7 @@ def pretokenize_split(
         out_row = {
             "input_ids": result["input_ids"],
             "loss_mask": result["loss_mask"],
+            "segments": result["segments"],
             "seq_len": result["seq_len"],
             "original_seq_len": result["original_seq_len"],
             "labeled_tokens": result["labeled_tokens"],

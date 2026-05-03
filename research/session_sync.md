@@ -188,6 +188,13 @@ Verified in the new repo:
 - Updated `research/P5_RECIPES.md` with `Recipe 1F/2F/4F`: build capped full-traj smoke parquet, pretokenize with patched template, run 10-step SFT smoke, patch checkpoint tokenizer, then run VLM/vLLM/GRPO smoke.
 - Local Windows QC can only cover static/script checks; P5 remains the source of truth for Qwen3.5 tokenizer rendering, CUDA SFT, vLLM serving, and VERL rollout prompt consistency.
 
+### 2026-05-03 Full-traj mask fix after P5 audit
+
+- P5 full-traj pretokenization smoke showed 499/500 train rows and 60/60 test rows were valid with no truncation; max train sequence length was 21,500 under `MAX_LENGTH=32768`.
+- The single failed audit row was not bad data. It exposed a mask-boundary bug: using `add_generation_prompt=True` for the prefix was not token-prefix-compatible with rendering the completed assistant message.
+- Patched `scripts/tau3/pretokenize_full_traj_sft.py` to build message spans from completed-prefix diffs only: `render(messages[:i], add_generation_prompt=False)` -> `render(messages[:i+1], add_generation_prompt=False)`.
+- The pretokenizer now emits `segments` metadata per message: role, segment type, assistant turn index, token start/end, loss flag, and tool names. Training ignores this today, but it creates a clean component index for future memory/retrieval experiments.
+
 ## Evidence Carried Forward
 
 From the old repo:

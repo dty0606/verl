@@ -210,6 +210,10 @@ Pass criteria:
 - `avg_labeled_tokens > 0`.
 - `avg_assistant_count > 1`, proving this is actually full trajectory.
 - `*.audit.jsonl` decoded spans include old `<think>` and tool names.
+- Each pre-tokenized row includes `segments` metadata with role/type,
+  token boundaries, assistant-turn index, loss flag, and tool names. This is
+  not consumed by SFT training yet, but it is the component-level index we can
+  reuse later for memory/retrieval experiments.
 
 ---
 
