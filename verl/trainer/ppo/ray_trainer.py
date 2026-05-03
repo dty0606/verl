@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import re
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -64,6 +65,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
+from verl.utils.model import compute_position_id_with_mask
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -1273,6 +1275,298 @@ class RayPPOTrainer:
         critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
         return critic_output
 
+    @staticmethod
+    def _remove_thinking_trace(text: str) -> str:
+        return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+
+    @staticmethod
+    def _decode_masked_response(tokenizer, token_ids: torch.Tensor, mask: torch.Tensor) -> str:
+        selected = token_ids[mask.to(torch.bool)]
+        if selected.numel() == 0:
+            return ""
+        return tokenizer.decode(selected, skip_special_tokens=False)
+
+    @staticmethod
+    def _collect_feedback(
+        *,
+        include_environment_feedback: bool,
+        reward_extra_infos_dict: Optional[dict[str, list]],
+        batch: DataProto,
+        batch_size: int,
+        serialize_nonstring_feedback: bool,
+    ) -> list[Optional[str]]:
+        if not include_environment_feedback:
+            return [None] * batch_size
+
+        values = None
+        for key in ("feedback", "teacher_feedback", "reward_feedback"):
+            if reward_extra_infos_dict is not None and key in reward_extra_infos_dict:
+                values = reward_extra_infos_dict[key]
+                break
+            if key in batch.non_tensor_batch:
+                values = batch.non_tensor_batch[key]
+                break
+        if values is None:
+            return [None] * batch_size
+
+        feedback: list[Optional[str]] = []
+        for item in list(values)[:batch_size]:
+            if item is None:
+                feedback.append(None)
+                continue
+            if hasattr(item, "item"):
+                item = item.item()
+            if isinstance(item, bytes):
+                item = item.decode("utf-8", errors="replace")
+            if not isinstance(item, str):
+                if not serialize_nonstring_feedback:
+                    feedback.append(None)
+                    continue
+                try:
+                    item = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                except Exception:
+                    item = str(item)
+            feedback.append(item if item.strip() else None)
+        if len(feedback) < batch_size:
+            feedback.extend([None] * (batch_size - len(feedback)))
+        return feedback
+
+    @staticmethod
+    def _collect_solutions_by_uid(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        *,
+        success_reward_threshold: float,
+    ) -> dict[Any, list[int]]:
+        seq_scores = reward_tensor.sum(dim=-1).detach().cpu().tolist()
+        uids = list(batch.non_tensor_batch.get("uid", []))
+        success_by_uid: dict[Any, list[int]] = defaultdict(list)
+        for idx, score in enumerate(seq_scores):
+            if idx < len(uids) and float(score) >= success_reward_threshold:
+                success_by_uid[uids[idx]].append(idx)
+        return success_by_uid
+
+    def _get_sdpo_solution(
+        self,
+        idx: int,
+        success_by_uid: dict[Any, list[int]],
+        uids: list[Any],
+        response_texts: list[str],
+        *,
+        dont_reprompt_on_self_success: bool,
+        remove_thinking_from_demonstration: bool,
+    ) -> Optional[str]:
+        if idx >= len(uids):
+            return None
+        solution_idxs = list(success_by_uid.get(uids[idx], []))
+        if dont_reprompt_on_self_success:
+            solution_idxs = [j for j in solution_idxs if j != idx]
+        if not solution_idxs:
+            return None
+        solution = response_texts[solution_idxs[0]]
+        if remove_thinking_from_demonstration:
+            solution = self._remove_thinking_trace(solution)
+        return solution
+
+    def _maybe_build_sdpo_teacher_batch(
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_extra_infos_dict: Optional[dict[str, list]] = None,
+    ) -> Optional[tuple[Optional[DataProto], torch.Tensor, dict[str, float]]]:
+        if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") != "sdpo":
+            return None
+
+        sdpo_cfg = self.config.get("tau3", {}).get("sdpo", {})
+        if not sdpo_cfg.get("enabled", True):
+            return None
+
+        responses = batch.batch["responses"]
+        response_len = responses.size(1)
+        full_response_attention_mask = batch.batch["attention_mask"][:, -response_len:]
+        assistant_response_mask = batch.batch["response_mask"]
+        response_texts = [
+            self._decode_masked_response(self.tokenizer, responses[i], assistant_response_mask[i])
+            for i in range(responses.size(0))
+        ]
+        batch_size = responses.size(0)
+        seq_scores = reward_tensor.sum(dim=-1).detach()
+        success_threshold = float(sdpo_cfg.get("success_reward_threshold", 1.0))
+        failure_threshold = float(sdpo_cfg.get("failure_reward_threshold", success_threshold))
+        failed_mask = seq_scores < failure_threshold
+        failed_mask_list = failed_mask.detach().cpu().tolist()
+
+        feedback_list = self._collect_feedback(
+            include_environment_feedback=bool(sdpo_cfg.get("include_environment_feedback", True)),
+            reward_extra_infos_dict=reward_extra_infos_dict,
+            batch=batch,
+            batch_size=batch_size,
+            serialize_nonstring_feedback=bool(sdpo_cfg.get("serialize_nonstring_feedback", True)),
+        )
+
+        use_successful_peer_solution = bool(sdpo_cfg.get("use_successful_peer_solution", False))
+        success_by_uid = (
+            self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=success_threshold)
+            if use_successful_peer_solution
+            else {}
+        )
+        uids = list(batch.non_tensor_batch.get("uid", []))
+        solution_strs = (
+            [
+                self._get_sdpo_solution(
+                    i,
+                    success_by_uid,
+                    uids,
+                    response_texts,
+                    dont_reprompt_on_self_success=bool(sdpo_cfg.get("dont_reprompt_on_self_success", True)),
+                    remove_thinking_from_demonstration=bool(
+                        sdpo_cfg.get("remove_thinking_from_demonstration", True)
+                    ),
+                )
+                for i in range(batch_size)
+            ]
+            if use_successful_peer_solution
+            else [None] * batch_size
+        )
+
+        only_failed_with_feedback = bool(sdpo_cfg.get("only_failed_with_feedback", True))
+        feedback_only_without_solution = bool(sdpo_cfg.get("environment_feedback_only_without_solution", True))
+        reprompt_template = sdpo_cfg.get(
+            "reprompt_template", "{prompt}{solution}{feedback}\n\nCorrectly solve the original question."
+        )
+        solution_template = sdpo_cfg.get("solution_template", "\n\nCorrect solution:\n\n{successful_previous_attempt}")
+        feedback_template = sdpo_cfg.get(
+            "feedback_template",
+            "\n\nThe following is feedback from your unsuccessful earlier attempt:\n\n{feedback_raw}",
+        )
+
+        raw_prompts = list(batch.non_tensor_batch.get("raw_prompt", []))
+        messages = []
+        target_mask_values: list[float] = []
+        feedback_used = []
+        solutions_used = []
+        for i in range(batch_size):
+            raw_prompt = list(raw_prompts[i]) if i < len(raw_prompts) else []
+            prompt_text = raw_prompt[-1].get("content", "") if raw_prompt else ""
+            system_messages = raw_prompt[:-1] if raw_prompt else []
+            on_failure_path = bool(failed_mask_list[i])
+            has_solution = solution_strs[i] is not None and (on_failure_path or not only_failed_with_feedback)
+            has_feedback = feedback_list[i] is not None and on_failure_path
+            use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
+            active = (has_solution or use_feedback) and (on_failure_path or not only_failed_with_feedback)
+
+            solution_section = (
+                solution_template.format(successful_previous_attempt=solution_strs[i]) if has_solution else ""
+            )
+            feedback_section = feedback_template.format(feedback_raw=feedback_list[i]) if use_feedback else ""
+            reprompt_text = (
+                reprompt_template.format(prompt=prompt_text, solution=solution_section, feedback=feedback_section)
+                if active
+                else prompt_text
+            )
+            messages.append(system_messages + [{"role": "user", "content": reprompt_text}])
+            target_mask_values.append(1.0 if active else 0.0)
+            feedback_used.append(use_feedback)
+            solutions_used.append(has_solution)
+
+        if sum(target_mask_values) == 0:
+            zeros = torch.zeros(batch_size, dtype=torch.float32, device=responses.device)
+            metrics = {
+                "self_distillation/reprompt_sample_fraction": 0.0,
+                "self_distillation/feedback_available_fraction": sum(f is not None for f in feedback_list) / batch_size,
+                "self_distillation/feedback_used_fraction": 0.0,
+                "self_distillation/success_sample_fraction": 0.0,
+                "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
+            }
+            return None, zeros, metrics
+
+        max_reprompt_len = int(sdpo_cfg.get("max_reprompt_len", 8192))
+        reprompt_truncation = str(sdpo_cfg.get("reprompt_truncation", "right"))
+        old_truncation_side = getattr(self.tokenizer, "truncation_side", "right")
+        self.tokenizer.truncation_side = reprompt_truncation if reprompt_truncation in {"left", "right"} else "right"
+        try:
+            teacher_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                return_tensors="pt",
+                return_dict=True,
+                continue_final_message=False,
+                add_generation_prompt=True,
+                enable_thinking=(
+                    self.config.data.apply_chat_template_kwargs.get("enable_thinking", True)
+                    if self.config.data.get("apply_chat_template_kwargs")
+                    else True
+                ),
+                max_length=max_reprompt_len,
+                padding=True,
+                truncation=reprompt_truncation != "error",
+            )
+        finally:
+            self.tokenizer.truncation_side = old_truncation_side
+
+        if reprompt_truncation == "error" and teacher_prompt["attention_mask"].sum(dim=1).max().item() > max_reprompt_len:
+            raise ValueError(f"SDPO teacher prompt exceeded max_reprompt_len={max_reprompt_len}")
+
+        teacher_prompt_ids = teacher_prompt["input_ids"].to(responses.device)
+        teacher_prompt_attention_mask = teacher_prompt["attention_mask"].to(responses.device)
+        teacher_input_ids = torch.cat([teacher_prompt_ids, responses], dim=1)
+        teacher_attention_mask = torch.cat(
+            [teacher_prompt_attention_mask, full_response_attention_mask.to(responses.device)], dim=1
+        )
+        teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
+        target_mask = torch.tensor(target_mask_values, dtype=torch.float32, device=responses.device)
+
+        teacher_batch = DataProto.from_dict(
+            tensors={
+                "prompts": teacher_prompt_ids,
+                "responses": responses,
+                "response_mask": assistant_response_mask,
+                "input_ids": teacher_input_ids,
+                "attention_mask": teacher_attention_mask,
+                "position_ids": teacher_position_ids,
+            }
+        )
+        teacher_batch.meta_info.update(batch.meta_info)
+        teacher_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+        metrics = {
+            "self_distillation/reprompt_sample_fraction": float(target_mask.mean().item()),
+            "self_distillation/feedback_available_fraction": sum(f is not None for f in feedback_list) / batch_size,
+            "self_distillation/feedback_used_fraction": sum(bool(x) for x in feedback_used) / batch_size,
+            "self_distillation/success_sample_fraction": sum(bool(x) for x in solutions_used) / batch_size,
+            "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
+            "self_distillation/teacher_prompt_token_mean": float(
+                teacher_prompt_attention_mask.float().sum(dim=1).mean().item()
+            ),
+            "self_distillation/teacher_prompt_saturation_fraction": float(
+                (teacher_prompt_attention_mask.float().sum(dim=1) >= max_reprompt_len).float().mean().item()
+            ),
+        }
+        return teacher_batch, target_mask, metrics
+
+    def _maybe_add_sdpo_teacher_logprobs(
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_extra_infos_dict: Optional[dict[str, list]] = None,
+    ) -> tuple[DataProto, dict[str, float]]:
+        teacher_result = self._maybe_build_sdpo_teacher_batch(batch, reward_tensor, reward_extra_infos_dict)
+        if teacher_result is None:
+            return batch, {}
+
+        teacher_batch, target_mask, metrics = teacher_result
+        if teacher_batch is None:
+            batch.batch["teacher_logprobs"] = batch.batch["old_log_probs"].detach().clone()
+            batch.batch["self_distillation_mask"] = target_mask
+            batch.batch["self_distillation_loss_mask"] = batch.batch["response_mask"]
+            return batch, metrics
+
+        teacher_log_prob, teacher_log_prob_mfu = self._compute_old_log_prob(teacher_batch)
+        batch.batch["teacher_logprobs"] = teacher_log_prob.batch["old_log_probs"].detach()
+        batch.batch["self_distillation_mask"] = target_mask
+        batch.batch["self_distillation_loss_mask"] = batch.batch["response_mask"]
+        metrics["perf/mfu/sdpo_teacher_infer"] = teacher_log_prob_mfu
+        return batch, metrics
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1479,6 +1773,12 @@ class RayPPOTrainer:
                                 metrics.update(calculate_debug_metrics(batch))
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+
+                    with marked_timer("sdpo_teacher", timing_raw, color="purple"):
+                        batch, sdpo_metrics = self._maybe_add_sdpo_teacher_logprobs(
+                            batch, reward_tensor, reward_extra_infos_dict
+                        )
+                        metrics.update(sdpo_metrics)
 
                     if self.use_reference_policy:
                         # compute reference log_prob

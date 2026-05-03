@@ -97,6 +97,9 @@ class PolicyLossConfig(BaseConfig):
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
+    sdpo_alpha: float = 1.0
+    sdpo_is_clip: Optional[float] = 2.0
+    sdpo_loss_coef: float = 1.0
 
 
 @dataclass

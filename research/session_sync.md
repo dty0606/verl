@@ -42,7 +42,7 @@ The intended path is:
 - Latest VERL's built-in `tool_agent` now has an optional Tau3 interaction path through `multi_turn.interaction_config_path`.
 - `tau3_qwen` tool parsing is registered for Qwen XML and legacy JSON tool-call outputs.
 - `run_local_tau3_grpo_live_p5.sh` is the current runnable RL baseline entrypoint.
-- `run_local_tau3_sdpo_live_p5.sh` intentionally fails fast until vanilla SDPO is ported through latest VERL's distillation stack.
+- `run_local_tau3_sdpo_live_p5.sh` is now the vanilla SDPO smoke/baseline launcher; memory/DENSE SDPO remains disabled.
 - Full-parameter thinking SFT should use latest VERL's native SFT trainer, not the old TRL script path.
 - 2026-05-02 QC patch: interaction config is optional-safe for non-Tau3 `tool_agent` configs, Tau3 tool/session runtime routing now follows the active interaction manager, launch scripts are executable, and protocol-SFT building now rejects missing thinking traces and canonical test-task validation by default.
 - 2026-05-02 checkpoint-format decision: use VLM-format `Qwen/Qwen3.5-4B` SFT export plus vLLM `--language-model-only`; do not depend on text-only `Qwen3_5ForCausalLM` checkpoints for RL rollout until upstream vLLM support is clearly merged and verified. See `research/migration/qwen35_vlm_sft_rl_implementation_plan.md`.
@@ -158,6 +158,7 @@ Verified in the new repo:
   - samples from turn-per-row SFT parquet with deterministic task-balanced selection,
   - filters to canonical train tasks by default,
   - supports explicit denylist (`--deny-task-ids 7`; add `39` only if re-confirmed),
+
   - requires reward=1 and target thinking by default,
   - caps ID variants per source assistant turn,
   - preserves tool/text/turn-position strata by round-robin sampling,
@@ -168,6 +169,19 @@ Verified in the new repo:
   - pretokenize to `datasets/tau3_sft_balanced_5k_pretokenized` at `MAX_LENGTH=24576`,
   - train latest-VERL VLM SFT with `engine.use_torch_compile=False`, no fused kernels, batch 32, one epoch.
 - Expected scale if only task 7 is denied: 29 usable train tasks, ~4,930 train rows, ~580 validation rows, ~155 optimizer steps at global batch 32, roughly 3-4 hours at the observed latest-VERL baseline.
+
+### 2026-05-03 Vanilla SDPO latest-VERL port
+
+- `run_local_tau3_sdpo_live_p5.sh` now launches a vanilla Tau3 SDPO baseline instead of failing fast.
+- Added `verl/trainer/config/tau3_sdpo_live.yaml`, based on the GRPO Tau3 live config but with `actor.policy_loss.loss_mode=sdpo`.
+- Latest trainer path now builds SDPO teacher reprompts after Tau3 rewards are extracted:
+  - selects failed samples with usable environment feedback,
+  - uses the original prompt plus feedback, no memory/retrieval,
+  - scores the original response under that reprompt with the actor log-prob path,
+  - attaches `teacher_logprobs`, `self_distillation_mask`, and `self_distillation_loss_mask` to the training batch.
+- Latest worker loss now supports response-token reverse-KL SDPO through `policy_loss.loss_mode=sdpo`.
+- Local Windows QC: `python -m py_compile` passed for `ray_trainer.py`, `losses.py`, and `actor.py`; full Hydra compose could not run locally because this Windows environment lacks `omegaconf`.
+- Next P5 action: run Recipe 9 one-step SDPO smoke and verify nonzero `self_distillation/reprompt_sample_fraction` for failed rollouts with feedback plus finite `actor/pg_loss`.
 
 ### 2026-05-03 Paired Tau3 evaluation script
 
@@ -218,7 +232,7 @@ From the old repo:
 - Does latest VERL SFT accept Qwen3.5 thinking traces and tau3 assistant-first conversations without local template hacks on P5?
 - Can latest VERL export a VLM-format `hf_model` for Qwen3.5-4B SFT, with `model_type=qwen3_5` and `Qwen3_5ForConditionalGeneration` preserved?
 - Can vLLM serve that exact SFT export with `--language-model-only`, and can the current Tau3 interaction-enabled `tool_agent` pass a one-step official-gym GRPO rollout smoke on P5?
-- What exact SDPO implementation path should be used in latest VERL after GRPO works: adapt upstream on-policy distillation or implement a minimal vanilla SDPO target builder first?
+- Does the new vanilla SDPO latest-VERL path produce nonzero reprompt targets and finite actor updates in the first P5 smoke?
 
 ## Guardrails
 

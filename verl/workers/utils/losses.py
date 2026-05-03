@@ -83,11 +83,20 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     metrics = {}
 
     # select fields and convert to padded tensor
+    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+
     fields = ["response_mask", "old_log_probs", "advantages"]
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
+    if loss_mode == "sdpo":
+        missing = {"teacher_logprobs", "self_distillation_mask"} - set(data.keys())
+        if missing:
+            raise ValueError(f"SDPO loss requires {sorted(missing)} in the training batch")
+        fields.extend(["teacher_logprobs", "self_distillation_mask"])
+        if "self_distillation_loss_mask" in data:
+            fields.append("self_distillation_loss_mask")
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
@@ -98,18 +107,62 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     loss_agg_mode = config.loss_agg_mode
 
-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
-
-    policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_metrics = policy_loss_fn(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        response_mask=response_mask,
-        loss_agg_mode=loss_agg_mode,
-        config=config,
-        rollout_is_weights=rollout_is_weights,
-    )
+    if loss_mode == "sdpo":
+        teacher_log_prob = data["teacher_logprobs"]
+        if teacher_log_prob.dim() == 3 and teacher_log_prob.size(-1) == 1:
+            teacher_log_prob = teacher_log_prob.squeeze(-1)
+        sdpo_loss_mask = data.get("self_distillation_loss_mask", response_mask).to(response_mask.dtype)
+        sdpo_loss_mask = sdpo_loss_mask * data["self_distillation_mask"].to(sdpo_loss_mask.dtype).unsqueeze(1)
+        if sdpo_loss_mask.sum().item() == 0:
+            pg_loss = log_prob.sum() * 0.0
+            pg_metrics = {
+                "actor/pg_clipfrac": 0.0,
+                "actor/ppo_kl": 0.0,
+                "actor/pg_clipfrac_lower": 0.0,
+                "self_distillation/empty_target_batch": 1.0,
+                "self_distillation/teacher_selected_fraction": 0.0,
+            }
+        else:
+            alpha = float(config.policy_loss.get("sdpo_alpha", 1.0))
+            if alpha != 1.0:
+                raise ValueError("Latest-VERL vanilla SDPO currently supports response-token reverse KL only (alpha=1.0)")
+            log_ratio = log_prob - teacher_log_prob
+            per_token_loss = log_ratio.detach() * log_prob
+            is_clip = config.policy_loss.get("sdpo_is_clip", 2.0)
+            if is_clip is not None:
+                negative_approx_kl = torch.clamp((log_prob - old_log_prob).detach(), min=-20.0, max=20.0)
+                per_token_loss = per_token_loss * torch.exp(negative_approx_kl).clamp(max=float(is_clip))
+            if rollout_is_weights is not None:
+                per_token_loss = per_token_loss * rollout_is_weights
+            pg_loss = agg_loss(
+                loss_mat=per_token_loss,
+                loss_mask=sdpo_loss_mask,
+                loss_agg_mode=loss_agg_mode,
+                batch_num_tokens=sdpo_loss_mask.sum().clamp(min=1.0),
+            ) * float(config.policy_loss.get("sdpo_loss_coef", 1.0))
+            pg_metrics = {
+                "actor/pg_clipfrac": 0.0,
+                "actor/ppo_kl": masked_mean(log_prob - old_log_prob, sdpo_loss_mask.bool()).detach().item(),
+                "actor/pg_clipfrac_lower": 0.0,
+                "self_distillation/empty_target_batch": 0.0,
+                "self_distillation/teacher_selected_fraction": (
+                    data["self_distillation_mask"].float().mean().detach().item()
+                ),
+                "self_distillation/token_fraction": (
+                    sdpo_loss_mask.float().sum() / response_mask.float().sum().clamp(min=1.0)
+                ).detach().item(),
+            }
+    else:
+        policy_loss_fn = get_policy_loss_fn(loss_mode)
+        pg_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=config,
+            rollout_is_weights=rollout_is_weights,
+        )
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
     # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower

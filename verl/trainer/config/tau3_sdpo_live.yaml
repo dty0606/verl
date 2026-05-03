@@ -1,0 +1,128 @@
+defaults:
+  - ppo_trainer
+  - _self_
+
+max_model_len: 24576
+
+data:
+  train_batch_size: 8
+  val_batch_size: 8
+  return_raw_chat: True
+  max_prompt_length: 16384
+  max_response_length: 4096
+  filter_overlong_prompts: True
+  truncation: error
+  shuffle: True
+
+actor_rollout_ref:
+  hybrid_engine: True
+  actor:
+    ppo_mini_batch_size: 8
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: ${max_model_len}
+    use_kl_loss: False
+    policy_loss:
+      loss_mode: sdpo
+      sdpo_alpha: 1.0
+      sdpo_is_clip: 2.0
+      sdpo_loss_coef: 1.0
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: 0
+  model:
+    path: Qwen/Qwen3.5-4B
+    trust_remote_code: True
+    use_remove_padding: True
+    enable_gradient_checkpointing: True
+    lora_rank: 0
+  rollout:
+    name: vllm
+    n: 8
+    calculate_log_probs: True
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.55
+    max_num_batched_tokens: ${max_model_len}
+    max_model_len: ${max_model_len}
+    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_max_token_len_per_gpu: ${max_model_len}
+    agent:
+      num_workers: 2
+      default_agent_loop: tool_agent
+    multi_turn:
+      enable: True
+      format: tau3_qwen
+      max_user_turns: 16
+      max_assistant_turns: 16
+      max_parallel_calls: 1
+      max_tool_response_length: 512
+      tool_response_truncate_side: middle
+      tokenization_sanity_check_mode: ignore_strippable
+      tool_config_path: ${oc.env:PROJECT_ROOT}/examples/sglang_multiturn/config/tool_config/tau3_live_airline_tool_config.yaml
+      interaction_config_path: ${oc.env:PROJECT_ROOT}/examples/sglang_multiturn/config/interaction_config/tau3_live_interaction_config.yaml
+    val_kwargs:
+      top_p: 0.95
+      temperature: 0.4
+      n: 4
+      do_sample: True
+
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: False
+  use_kl_in_reward: False
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+reward:
+  custom_reward_function:
+    path: ${oc.env:PROJECT_ROOT}/verl/utils/reward_score/feedback/tau3_live.py
+    name: compute_score
+  reward_model:
+    enable: False
+
+ray_kwargs:
+  ray_init:
+    include_dashboard: False
+
+trainer:
+  project_name: SDPO-${oc.env:USER}
+  experiment_name: tau3_sdpo_live
+  val_before_train: False
+  total_epochs: 300
+  total_training_steps: 300
+  test_freq: 30
+  save_freq: 30
+  default_local_dir: ${oc.env:SDPO_CHECKPOINT_ROOT,checkpoints/SDPO}/${trainer.project_name}/${trainer.experiment_name}
+
+tau3:
+  runtime: ${oc.env:TAU3_LIVE_RUNTIME,official_gym}
+  feedback_mode: ${oc.env:TAU3_LIVE_FEEDBACK_FORMAT,json}
+  domain: airline
+  selected_task_ids: ${oc.env:TAU3_LIVE_TASK_IDS,}
+  sdpo:
+    enabled: True
+    max_reprompt_len: 8192
+    reprompt_truncation: right
+    success_reward_threshold: 1.0
+    failure_reward_threshold: 1.0
+    include_environment_feedback: True
+    use_successful_peer_solution: False
+    only_failed_with_feedback: True
+    dont_reprompt_on_self_success: True
+    environment_feedback_only_without_solution: True
+    remove_thinking_from_demonstration: True
+    serialize_nonstring_feedback: True
+    reprompt_template: |-
+      {prompt}{solution}{feedback}
+
+      Correctly solve the original task.
+    solution_template: |-
+
+      Correct solution:
+
+      {successful_previous_attempt}
+    feedback_template: |-
+
+      The following is feedback from your unsuccessful earlier attempt:
+
+      {feedback_raw}

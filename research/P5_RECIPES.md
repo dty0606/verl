@@ -656,12 +656,59 @@ No LoRA. No `SFT_LORA_*` env vars. Full checkpoint loaded directly.
 
 ---
 
-## Recipe 9: Vanilla SDPO (not yet runnable)
+## Recipe 9: One-Step Vanilla SDPO Smoke
 
-`run_local_tau3_sdpo_live_p5.sh` intentionally fails fast.
-See `research/migration/sdpo_latest_verl_port_notes.md` for the port plan.
+Run only after the SFT checkpoint passes vLLM serve and the one-step GRPO smoke.
+This is vanilla SDPO only: no memory/DENSE retrieval.
 
-Do not attempt until GRPO baseline is understood.
+```bash
+cd ~/verl_tau3_sdpo
+
+export HF_CKPT=$(ls -d checkpoints/SDPO/tau3_verl_sft/*/global_step_*/huggingface | tail -1)
+export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
+export TAU3_LIVE_RUNTIME=official_gym
+export MODEL_PATH="$HF_CKPT"
+export ENABLE_THINKING=true
+export VLLM_LANGUAGE_MODEL_ONLY=true
+export N_GPUS_PER_NODE=8
+export ROLLOUT_TP_SIZE=1
+export TRAIN_BATCH_SIZE=4
+export ROLLOUT_BATCH_SIZE=2
+export PPO_MINI_BATCH_SIZE=4
+export VAL_N=1
+export TOTAL_TRAINING_STEPS=1
+export TOTAL_EPOCHS=1
+export TEST_FREQ=1
+export SAVE_FREQ=1
+export LR=1e-6
+export MAX_PROMPT_LENGTH=16384
+export MAX_RESPONSE_LENGTH=512
+export MAX_MODEL_LEN=24576
+export SDPO_MAX_REPROMPT_LEN=8192
+export SDPO_REPROMPT_TRUNCATION=right
+export ROLLOUT_TEMPERATURE=0.2
+export ROLLOUT_TOP_P=0.95
+export VAL_TEMPERATURE=0.2
+export VAL_TOP_P=0.95
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+
+mkdir -p logs outputs/sdpo_vlm_sft_smoke/rollout_data
+
+ROLLOUT_DATA_DIR=outputs/sdpo_vlm_sft_smoke/rollout_data \
+bash run_local_tau3_sdpo_live_p5.sh \
+  datasets/tau3_live_airline_canonical_json \
+  sdpo_vlm_sft_smoke \
+  json \
+  2>&1 | tee logs/sdpo_vlm_sft_smoke.log
+```
+
+Pass criteria:
+- Decoded assistant output is not gibberish
+- `tau3_live_result` and `feedback` appear in rollout/reward fields for failed samples
+- `self_distillation/reprompt_sample_fraction` is nonzero if failed samples have feedback
+- `actor/pg_loss`, `self_distillation/token_fraction`, and `actor/grad_norm` are finite
+
+**Stop if `self_distillation/reprompt_sample_fraction == 0` for a failed batch with feedback.**
 
 ---
 
