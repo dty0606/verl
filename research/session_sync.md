@@ -195,6 +195,14 @@ Verified in the new repo:
 - Patched `scripts/tau3/pretokenize_full_traj_sft.py` to build message spans from completed-prefix diffs only: `render(messages[:i], add_generation_prompt=False)` -> `render(messages[:i+1], add_generation_prompt=False)`.
 - The pretokenizer now emits `segments` metadata per message: role, segment type, assistant turn index, token start/end, loss flag, and tool names. Training ignores this today, but it creates a clean component index for future memory/retrieval experiments.
 
+### 2026-05-03 RL token-budget audit before length tuning
+
+- Current GRPO smoke risk moved from SFT mechanics to rollout context length. `MAX_PROMPT_LENGTH=4096` filtered all tau3 airline prompts, producing `filter dataset len: 0`; use at least the normal 16K prompt budget for tau3 smoke.
+- `run_local_tau3_grpo_live_p5.sh` now adds `+data.apply_chat_template_kwargs.enable_thinking=...`; without the `+`, Hydra rejects the custom Qwen thinking key in struct mode.
+- Added `scripts/tau3/analyze_full_traj_token_budget.py` to read pre-tokenized full-trajectory parquet and summarize exact role/segment/assistant-turn token budgets from `segments`.
+- The analyzer also optionally decodes assistant spans to estimate how assistant tokens split into `<think>`, `<tool_call>`, visible answer text, and template overhead. Those subcomponent counts are approximate; role/turn/token-boundary counts are exact.
+- Use this audit before choosing RL `MAX_PROMPT_LENGTH`, `MAX_RESPONSE_LENGTH`, `MAX_MODEL_LEN`, and rollout batch size. It should report prompt-length threshold risks for 4K/8K/16K/24K/32K and P50/P90/P95/max context growth by assistant turn.
+
 ## Evidence Carried Forward
 
 From the old repo:

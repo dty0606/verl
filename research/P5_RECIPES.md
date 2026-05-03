@@ -217,6 +217,43 @@ Pass criteria:
 
 ---
 
+## Recipe 3F: Full-Trajectory Token Budget Audit
+
+Run this before choosing RL `MAX_PROMPT_LENGTH` / `MAX_MODEL_LEN`. It measures
+the exact token budget from the pre-tokenized `segments` metadata and estimates
+how assistant tokens split across historical thinking, tool calls, and visible
+assistant text.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+python3 scripts/tau3/analyze_full_traj_token_budget.py \
+  --dataset datasets/tau3_sft_full_traj_smoke_pretok \
+  --split both \
+  --model Qwen/Qwen3.5-4B \
+  --component-sample-rows 500 \
+  --thresholds 4096 8192 16384 24576 32768 \
+  --output-json research/diagnostics/full_traj_token_budget_smoke.json \
+  2>&1 | tee logs/full_traj_token_budget_smoke.log
+```
+
+For the real full-trajectory dataset, point `--dataset` at the production
+pre-tokenized directory and raise `--component-sample-rows` only if the decoded
+component estimate is still fast enough. Exact role/turn stats always cover the
+entire split.
+
+Decision use:
+
+- If `assistant_prompt_len_before_turn.p90` is already near 16K, the one-step
+  GRPO smoke should start at `MAX_PROMPT_LENGTH=16384`, not 4096.
+- If many rows exceed 24K total context, either reduce response length, use a
+  smaller rollout batch, or build a shorter/easier RL smoke subset before a
+  full baseline.
+- The component estimate is approximate for `<think>` vs tool-call vs visible
+  text, but exact for role/turn boundaries.
+
+---
+
 ## Recipe 4F: Ten-Step Full-Trajectory SFT Smoke
 
 ```bash
@@ -233,8 +270,8 @@ PYTORCH_ALLOC_CONF=expandable_segments:True \
 bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
   datasets/tau3_sft_full_traj_smoke_pretok \
   qwen35_4b_vlm_full_traj_sft_10step_smoke \
-  data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
-  data.custom_cls.name=PretokenizedSFTDataset \
+  +data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
+  +data.custom_cls.name=PretokenizedSFTDataset \
   engine.use_torch_compile=False \
   model.use_fused_kernels=False \
   trainer.total_training_steps=10 \
@@ -545,9 +582,9 @@ export TOTAL_EPOCHS=1
 export TEST_FREQ=1
 export SAVE_FREQ=1
 export LR=1e-6
-export MAX_PROMPT_LENGTH=4096
+export MAX_PROMPT_LENGTH=16384
 export MAX_RESPONSE_LENGTH=512
-export MAX_MODEL_LEN=8192
+export MAX_MODEL_LEN=24576
 export ROLLOUT_TEMPERATURE=0.2
 export ROLLOUT_TOP_P=0.95
 export VAL_TEMPERATURE=0.2
