@@ -52,16 +52,39 @@ mkdir -p "$OUTPUT_ROOT" "$LOG_DIR"
 export VLLM_LANGUAGE_MODEL_ONLY="${VLLM_LANGUAGE_MODEL_ONLY:-true}"
 
 # --- Task split across GPUs ---
-# 20 tasks split across 8 GPUs (2-3 tasks each)
-TASKS_0="2,6,8"
-TASKS_1="13,16"
-TASKS_2="18,19"
-TASKS_3="22,24"
-TASKS_4="25,26"
-TASKS_5="29,30,31"
-TASKS_6="32,35,37"
-TASKS_7="44,45,48"
-TASK_GROUPS=("$TASKS_0" "$TASKS_1" "$TASKS_2" "$TASKS_3" "$TASKS_4" "$TASKS_5" "$TASKS_6" "$TASKS_7")
+# Split TEST_TASK_IDS evenly and contiguously across available GPUs. This keeps
+# the recorded eval grid and the actual launched task grid identical.
+IFS=',' read -r -a TASK_ID_ARRAY <<< "$TEST_TASK_IDS"
+TASK_COUNT=${#TASK_ID_ARRAY[@]}
+if [ "$TASK_COUNT" -eq 0 ]; then
+    echo "No TEST_TASK_IDS provided."
+    exit 1
+fi
+ACTIVE_GROUPS=$NUM_GPUS
+if [ "$TASK_COUNT" -lt "$ACTIVE_GROUPS" ]; then
+    ACTIVE_GROUPS=$TASK_COUNT
+fi
+BASE_GROUP_SIZE=$((TASK_COUNT / ACTIVE_GROUPS))
+EXTRA_TASKS=$((TASK_COUNT % ACTIVE_GROUPS))
+TASK_GROUPS=()
+TASK_OFFSET=0
+for gpu in $(seq 0 $((ACTIVE_GROUPS - 1))); do
+    GROUP_SIZE=$BASE_GROUP_SIZE
+    if [ "$gpu" -lt "$EXTRA_TASKS" ]; then
+        GROUP_SIZE=$((GROUP_SIZE + 1))
+    fi
+    GROUP_TASKS=()
+    for idx in $(seq 0 $((GROUP_SIZE - 1))); do
+        TASK_ID="${TASK_ID_ARRAY[$((TASK_OFFSET + idx))]}"
+        TASK_ID="${TASK_ID//[[:space:]]/}"
+        if [ -n "$TASK_ID" ]; then
+            GROUP_TASKS+=("$TASK_ID")
+        fi
+    done
+    TASK_GROUPS+=("$(IFS=','; echo "${GROUP_TASKS[*]}")")
+    TASK_OFFSET=$((TASK_OFFSET + GROUP_SIZE))
+done
+EXPECTED_TRAJ_COUNT=$((TASK_COUNT * EVAL_N))
 
 # --- Record eval config ---
 cat > "${OUTPUT_ROOT}/eval_config.json" <<EOF
@@ -97,10 +120,10 @@ for seed in $EVAL_SEEDS; do
     echo "--- Seed $seed ---"
     SEED_DIR="${OUTPUT_ROOT}/seed${seed}"
     TRAJ_DIR="${SEED_DIR}/trajectories"
+    rm -rf "$SEED_DIR"
     mkdir -p "$TRAJ_DIR"
 
-    for gpu in $(seq 0 $((NUM_GPUS - 1))); do
-        if [ $gpu -ge ${#TASK_GROUPS[@]} ]; then break; fi
+    for gpu in $(seq 0 $((${#TASK_GROUPS[@]} - 1))); do
         CUDA_VISIBLE_DEVICES=$gpu python3 "$EVAL_SCRIPT" \
             --domain airline \
             --models "$MODEL_PATH" \
@@ -115,7 +138,7 @@ for seed in $EVAL_SEEDS; do
             --output-dir "${SEED_DIR}/gpu${gpu}" \
             --dump-trajectories "$TRAJ_DIR" \
             --seed "$seed" \
-            --vllm-language-model-only true \
+            --vllm-language-model-only "$VLLM_LANGUAGE_MODEL_ONLY" \
             --max-model-len "$MAX_MODEL_LEN" \
             --tensor-parallel-size 1 \
             > "${LOG_DIR}/eval_${RUN_NAME}_seed${seed}_gpu${gpu}.log" 2>&1 &
@@ -125,6 +148,10 @@ for seed in $EVAL_SEEDS; do
     wait
     TRAJ_COUNT=$(ls "$TRAJ_DIR"/*.json 2>/dev/null | wc -l)
     echo "  Seed $seed complete: $TRAJ_COUNT trajectories"
+    if [ "$TRAJ_COUNT" -ne "$EXPECTED_TRAJ_COUNT" ]; then
+        echo "  ERROR: expected $EXPECTED_TRAJ_COUNT trajectories for seed $seed, found $TRAJ_COUNT"
+        exit 2
+    fi
 done
 
 echo ""
@@ -136,6 +163,7 @@ echo "================================================================"
 python3 - "$OUTPUT_ROOT" <<'PYEOF'
 import json, glob, sys
 from collections import defaultdict
+from math import comb
 from pathlib import Path
 
 output_root = Path(sys.argv[1])
@@ -159,26 +187,45 @@ print("-" * (12 + 7 * len(seeds) + 25))
 
 agg = {k: [] for k in ["p1", "p2", "p3", "p4"]}
 per_seed_agg = {s: [] for s in seeds}
+per_seed_passk = {s: {k: [] for k in ["p1", "p2", "p3", "p4"]} for s in seeds}
 task_table = {}
+
+def pass_hat(success_count, trial_count, k):
+    if trial_count < k:
+        return 0.0
+    if k == 1:
+        return success_count / trial_count if trial_count else 0.0
+    return comb(success_count, k) / comb(trial_count, k) if success_count >= k else 0.0
 
 for task_id in sorted(task_results.keys(), key=lambda x: int(x)):
     rs = task_results[task_id]
-    p1 = sum(1 for r in rs if r >= 1.0) / len(rs) if rs else 0
+    c = sum(1 for r in rs if r >= 1.0)
+    n = len(rs)
+    p1 = pass_hat(c, n, 1)
+    p2 = pass_hat(c, n, 2)
+    p3 = pass_hat(c, n, 3)
+    p4 = pass_hat(c, n, 4)
     agg["p1"].append(p1)
-    agg["p2"].append(p1 ** 2)
-    agg["p3"].append(p1 ** 3)
-    agg["p4"].append(p1 ** 4)
+    agg["p2"].append(p2)
+    agg["p3"].append(p3)
+    agg["p4"].append(p4)
 
     print(f"{task_id:>4s} | ", end="")
     seed_p1s = {}
     for s in seeds:
         srs = seed_task_results[s].get(task_id, [])
-        sp1 = sum(1 for r in srs if r >= 1.0) / len(srs) if srs else 0
+        sc = sum(1 for r in srs if r >= 1.0)
+        sn = len(srs)
+        sp1 = pass_hat(sc, sn, 1)
+        per_seed_passk[s]["p1"].append(sp1)
+        per_seed_passk[s]["p2"].append(pass_hat(sc, sn, 2))
+        per_seed_passk[s]["p3"].append(pass_hat(sc, sn, 3))
+        per_seed_passk[s]["p4"].append(pass_hat(sc, sn, 4))
         per_seed_agg[s].append(sp1)
         seed_p1s[s] = sp1
         print(f"{sp1:>6.2f}", end=" ")
-    print(f"| {p1:>5.2f} {p1**2:>5.2f} {p1**3:>5.2f} {p1**4:>5.2f}")
-    task_table[task_id] = {"p1": p1, "p2": p1**2, "p3": p1**3, "p4": p1**4, "per_seed": seed_p1s}
+    print(f"| {p1:>5.2f} {p2:>5.2f} {p3:>5.2f} {p4:>5.2f}")
+    task_table[task_id] = {"p1": p1, "p2": p2, "p3": p3, "p4": p4, "per_seed": seed_p1s}
 
 nt = len(agg["p1"])
 print("-" * (12 + 7 * len(seeds) + 25))
@@ -198,6 +245,10 @@ results = {
     "pass_pow_3": sum(agg["p3"]) / nt if nt else 0,
     "pass_pow_4": sum(agg["p4"]) / nt if nt else 0,
     "per_seed_pass_at_1": {s: sum(per_seed_agg[s]) / nt for s in seeds} if nt else {},
+    "per_seed_pass_pow": {
+        s: {f"pass^{i}": sum(per_seed_passk[s][f"p{i}"]) / nt for i in range(1, 5)}
+        for s in seeds
+    } if nt else {},
     "per_task": task_table,
 }
 results_path = output_root / "results.json"

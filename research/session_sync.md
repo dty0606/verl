@@ -169,6 +169,15 @@ Verified in the new repo:
   - train latest-VERL VLM SFT with `engine.use_torch_compile=False`, no fused kernels, batch 32, one epoch.
 - Expected scale if only task 7 is denied: 29 usable train tasks, ~4,930 train rows, ~580 validation rows, ~155 optimizer steps at global batch 32, roughly 3-4 hours at the observed latest-VERL baseline.
 
+### 2026-05-03 Paired Tau3 evaluation script
+
+- Added `scripts/tau3/eval_tau3_paired.sh` for fair model comparison on the same `task x trial` grid.
+- Default grid is canonical airline test20, `EVAL_SEEDS="42 123 456"`, and `EVAL_N=4`; because `eval_tau3_base_models.py` uses `seed + sample_idx`, this produces 12 rollouts per task across the three seed groups.
+- The wrapper now derives GPU task groups from `TEST_TASK_IDS`, so recorded config and launched tasks cannot silently diverge.
+- It records `eval_config.json`, clears each seed output directory before rerun, checks every seed produces `len(TEST_TASK_IDS) * EVAL_N` trajectories, and writes `results.json`.
+- Aggregation now reports tau-style finite-sample `pass^k` using `comb(successes, k) / comb(trials, k)` rather than `p1 ** k`.
+- Runtime note: the wrapper still defaults `EVAL_SCRIPT=$HOME/SDPO-qwen35/scripts/eval_tau3_base_models.py`, so P5/Kiro must either keep the old repo at that path or override `EVAL_SCRIPT` explicitly.
+
 ## Evidence Carried Forward
 
 From the old repo:
