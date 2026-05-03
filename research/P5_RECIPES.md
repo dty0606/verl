@@ -150,21 +150,71 @@ Pass criteria per row:
 
 ## Recipe 3: Pre-Tokenize Turn SFT Data
 
-Run after audit passes. This moves Qwen3.5 chat-template work out of the
-training loop. Use left truncation if any row exceeds `MAX_LENGTH`, because the
-current assistant answer is at the end of the sequence.
+Run after audit passes. First curate a balanced raw turn-row subset; then move
+Qwen3.5 chat-template work out of the training loop. Use left truncation if any
+row exceeds `MAX_LENGTH`, because the current assistant answer is at the end of
+the sequence.
+
+### 3A. Curate a Balanced 5K Pilot
+
+This is the current preferred SFT baseline. The full 75K turn-row dataset is
+valid, but too expensive for the first VLM-format VERL SFT pass. Sample evenly
+from canonical train tasks and exclude task 7, which has known assertion issues.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+python3 scripts/tau3/curate_turn_sft_subset.py \
+  --input datasets/tau3_sft_thinking_train_only \
+  --output datasets/tau3_sft_thinking_balanced_5k \
+  --deny-task-ids 7 \
+  --train-rows-per-task 170 \
+  --val-rows-per-task 20 \
+  --max-id-variants-per-source-turn 1 \
+  --require-final-reward 1.0 \
+  --require-thinking \
+  --overwrite \
+  2>&1 | tee logs/curate_turn_sft_balanced_5k.log
+```
+
+Expected if only task 7 is denied: 29 usable tasks, about 4,930 train rows and
+580 validation rows. If task 39 is re-confirmed assertion-bad or unsolvable for
+the generator, rerun with `--deny-task-ids 7 39` and expect about 5,040 train
+rows with `--train-rows-per-task 180`.
+
+Verify:
+
+```bash
+python3 - <<'PY'
+import json
+m = json.load(open("datasets/tau3_sft_thinking_balanced_5k/manifest.json"))
+print("train_rows", m["train_rows"], "test_rows", m["test_rows"])
+print("denied", m["deny_task_ids"])
+print("shortfall_tasks", m["shortfall_tasks"])
+print("train_rows_per_task", m["train_rows_per_task"])
+assert "7" not in m["train_rows_per_task"], m["train_rows_per_task"]
+assert not m["shortfall_tasks"], m["shortfall_tasks"]
+assert min(m["train_rows_per_task"].values()) >= 150, m["train_rows_per_task"]
+print("PASS: balanced SFT pilot manifest is sane")
+PY
+```
+
+Stop if task 7 appears, if many tasks have shortfalls, or if tool/final-text
+strata look collapsed in the manifest.
+
+### 3B. Pre-Tokenize the Balanced Pilot
 
 ```bash
 cd ~/verl_tau3_sdpo
 
 python3 scripts/tau3/pretokenize_turn_sft.py \
-  --input datasets/tau3_sft_thinking_train_only \
-  --output datasets/tau3_sft_pretokenized \
+  --input datasets/tau3_sft_thinking_balanced_5k \
+  --output datasets/tau3_sft_balanced_5k_pretokenized \
   --model Qwen/Qwen3.5-4B \
-  --max-length 32768 \
+  --max-length 24576 \
   --truncation left \
   --workers 8 \
-  2>&1 | tee logs/pretokenize_turn_sft.log
+  2>&1 | tee logs/pretokenize_turn_sft_balanced_5k.log
 ```
 
 Verify the manifest before training:
@@ -172,7 +222,7 @@ Verify the manifest before training:
 ```bash
 python3 - <<'PY'
 import json
-manifest = json.load(open("datasets/tau3_sft_pretokenized/manifest.json"))
+manifest = json.load(open("datasets/tau3_sft_balanced_5k_pretokenized/manifest.json"))
 for split in ["train", "test"]:
     stats = manifest.get(split, {})
     print(split, stats)
@@ -201,60 +251,65 @@ REPORT_TO='["console"]' \
 MODEL_PATH=Qwen/Qwen3.5-4B \
 CHECKPOINT_SAVE_CONTENTS='["model","optimizer","extra","hf_model"]' \
 NUM_GPUS=8 TOTAL_EPOCHS=1 SAVE_FREQ=1 TEST_FREQ=1 \
-MAX_LENGTH=32768 MAX_TOKEN_LEN_PER_GPU=32768 \
+MAX_LENGTH=24576 MAX_TOKEN_LEN_PER_GPU=24576 \
 TRAIN_BATCH_SIZE=32 MICRO_BATCH_SIZE_PER_GPU=1 \
 USE_LIGER=true LR=1e-5 TRUNCATION=error \
 PYTORCH_ALLOC_CONF=expandable_segments:True \
 bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
-  datasets/tau3_sft_pretokenized \
-  qwen35_4b_vlm_export_smoke_pretok \
+  datasets/tau3_sft_balanced_5k_pretokenized \
+  qwen35_4b_vlm_export_smoke_balanced5k \
   data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
   data.custom_cls.name=PretokenizedSFTDataset \
+  engine.use_torch_compile=False \
+  model.use_fused_kernels=False \
   trainer.total_training_steps=2 \
   trainer.max_ckpt_to_keep=1 \
-  2>&1 | tee logs/sft_vlm_export_smoke_pretok.log
+  2>&1 | tee logs/sft_vlm_export_smoke_balanced5k.log
 ```
 
 Pass criteria:
-- Step time should improve dramatically versus on-the-fly `TurnSFTDataset`
+- Step time should be close to the known VERL baseline, not the 75K all-row run
 - Loss is finite and nonzero
 - A `huggingface/` checkpoint is saved
 
-**Stop if step time is still tens of seconds or the loss/mask path fails.**
+**Stop if loss/mask path fails or VLM-format checkpoint export is missing.**
 
 ---
 
-## Recipe 5: Full Pre-Tokenized SFT Run
+## Recipe 5: Balanced Pre-Tokenized SFT Run
 
-Use all rows by default. Only rebuild with `--max-rows-per-task` if the build
-manifest shows severe task skew.
+Train the balanced 5K pilot first. Use the full 75K row dataset only after the
+VLM checkpoint -> vLLM -> GRPO path is proven.
 
 ```bash
 cd ~/verl_tau3_sdpo
 
 MODEL_PATH=Qwen/Qwen3.5-4B \
 CHECKPOINT_SAVE_CONTENTS='["model","optimizer","extra","hf_model"]' \
-NUM_GPUS=8 TOTAL_EPOCHS=1 SAVE_FREQ=1000 TEST_FREQ=1000 \
-MAX_LENGTH=32768 MAX_TOKEN_LEN_PER_GPU=32768 \
+NUM_GPUS=8 TOTAL_EPOCHS=1 SAVE_FREQ=100 TEST_FREQ=100 \
+MAX_LENGTH=24576 MAX_TOKEN_LEN_PER_GPU=24576 \
 TRAIN_BATCH_SIZE=32 MICRO_BATCH_SIZE_PER_GPU=1 \
 USE_LIGER=true LR=1e-5 TRUNCATION=error \
 PYTORCH_ALLOC_CONF=expandable_segments:True \
 bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
-  datasets/tau3_sft_pretokenized \
-  qwen35_4b_vlm_sft_9k_turn_pretok \
+  datasets/tau3_sft_balanced_5k_pretokenized \
+  qwen35_4b_vlm_sft_balanced5k_turn_pretok \
   data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
   data.custom_cls.name=PretokenizedSFTDataset \
+  engine.use_torch_compile=False \
+  model.use_fused_kernels=False \
   trainer.max_ckpt_to_keep=2 \
-  2>&1 | tee logs/sft_full_9k_turn_pretok.log
+  2>&1 | tee logs/sft_balanced5k_turn_pretok.log
 ```
 
-Expected: ~75,949 train rows / batch 32 = ~2,374 optimizer steps. Target
-runtime is 2-3 hours if pre-tokenized step time is healthy.
+Expected: about 4,930 train rows / batch 32 = about 155 optimizer steps.
+At the observed latest-VERL baseline of roughly 80s/step, this is about
+3.5 hours. That is acceptable for the first VLM-format SFT baseline.
 
 If OOM or too slow:
 1. Confirm Liger is active in the log (`use_liger=True`)
 2. Try `TRAIN_BATCH_SIZE=16`
-3. Try `MAX_LENGTH=24576` as last resort, then re-run pre-tokenization
+3. Try `MAX_LENGTH=16384`, then re-run pre-tokenization
 
 <!-- legacy estimate superseded by Recipe 5 above
 

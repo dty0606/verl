@@ -149,6 +149,26 @@ Verified in the new repo:
   - If smoke step time is healthy and checkpoint export is VLM-format, train all rows for one epoch with `SAVE_FREQ=1000`, `TEST_FREQ=1000`, and no row cap.
 - Sampling decision: use all ~75,949 train turn rows by default. Only rebuild with `--max-rows-per-task` if the manifest shows severe task skew, e.g. one task contributes more than ~10-12% of train rows or max/median task count exceeds ~2.5x.
 
+### 2026-05-02 Balanced 5K SFT pilot decision
+
+- P5 timing corrected the old TRL comparison: the 1K full-trajectory TRL run was ~52s/step at `MAX_LENGTH=16384`, not ~1.8s/step. Latest-VERL VLM SFT at ~80s/step is slower per step, but the real blocker is the all-row dataset size (~75K train rows).
+- Fused Triton kernels did not improve the latest-VERL Qwen3.5 VLM SFT run (~116s/step), so do not continue engine/kernel tuning for this pass.
+- Current decision: train a balanced VLM-format SFT pilot first, not the full 75K turn-row set.
+- Added `scripts/tau3/curate_turn_sft_subset.py`:
+  - samples from turn-per-row SFT parquet with deterministic task-balanced selection,
+  - filters to canonical train tasks by default,
+  - supports explicit denylist (`--deny-task-ids 7`; add `39` only if re-confirmed),
+  - requires reward=1 and target thinking by default,
+  - caps ID variants per source assistant turn,
+  - preserves tool/text/turn-position strata by round-robin sampling,
+  - writes manifest counts by task, target kind, tool name, turn bucket, and shortfall.
+- `pretokenize_turn_sft.py` now preserves lightweight metadata columns such as `task_id`, `assistant_turn_index`, `target_kind`, and `curation_stratum` in the pre-tokenized parquet for audit/debugging. `PretokenizedSFTDataset` ignores extra columns.
+- Recommended P5 path:
+  - curate `datasets/tau3_sft_thinking_balanced_5k` from `datasets/tau3_sft_thinking_train_only` with `--deny-task-ids 7 --train-rows-per-task 170 --val-rows-per-task 20`,
+  - pretokenize to `datasets/tau3_sft_balanced_5k_pretokenized` at `MAX_LENGTH=24576`,
+  - train latest-VERL VLM SFT with `engine.use_torch_compile=False`, no fused kernels, batch 32, one epoch.
+- Expected scale if only task 7 is denied: 29 usable train tasks, ~4,930 train rows, ~580 validation rows, ~155 optimizer steps at global batch 32, roughly 3-4 hours at the observed latest-VERL baseline.
+
 ## Evidence Carried Forward
 
 From the old repo:

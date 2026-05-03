@@ -25,11 +25,32 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:  # pragma: no cover - local lightweight fallback
+    def tqdm(iterable=None, **kwargs):
+        return iterable if iterable is not None else []
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+DEFAULT_METADATA_COLUMNS = [
+    "task_id",
+    "sample_id",
+    "source_path",
+    "source_index",
+    "id_variant",
+    "assistant_turn_index",
+    "source_message_index",
+    "target_kind",
+    "target_tool_name",
+    "turn_bucket",
+    "curation_stratum",
+    "curation_selected_split",
+]
 
 
 def _tokenize_row(row_dict: dict, tokenizer_path: str, max_length: int, truncation: str) -> dict | None:
@@ -151,9 +172,11 @@ def pretokenize_split(
     max_length: int,
     truncation: str,
     workers: int,
+    metadata_columns: list[str],
 ) -> dict:
     df = pd.read_parquet(input_path)
     rows = df.to_dict(orient="records")
+    preserved_metadata_columns = [column for column in metadata_columns if column in df.columns]
 
     results = []
     errors = 0
@@ -182,10 +205,13 @@ def pretokenize_split(
     # Build output dataframe
     out_rows = []
     for idx, result in results:
-        out_rows.append({
+        out_row = {
             "input_ids": result["input_ids"],
             "loss_mask": result["loss_mask"],
-        })
+        }
+        for column in preserved_metadata_columns:
+            out_row[column] = rows[idx].get(column)
+        out_rows.append(out_row)
 
     out_df = pd.DataFrame(out_rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -200,6 +226,7 @@ def pretokenize_split(
         "max_seq_len": max(r[1]["seq_len"] for r in results) if results else 0,
         "max_original_seq_len": max(r[1]["original_seq_len"] for r in results) if results else 0,
         "truncated_rows": sum(1 for _, result in results if result.get("truncated")),
+        "preserved_metadata_columns": preserved_metadata_columns,
     }
     return stats
 
@@ -218,6 +245,12 @@ def main():
     )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--allow-errors", action="store_true", help="Write output even if some rows fail tokenization.")
+    parser.add_argument(
+        "--metadata-columns",
+        nargs="*",
+        default=DEFAULT_METADATA_COLUMNS,
+        help="Optional row metadata columns to preserve in the pre-tokenized parquet for audits/debugging.",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input).expanduser()
@@ -232,7 +265,15 @@ def main():
             continue
         output_path = output_dir / f"{split}.parquet"
         print(f"\n=== Pre-tokenizing {split} ===")
-        stats = pretokenize_split(input_path, output_path, args.model, args.max_length, args.truncation, args.workers)
+        stats = pretokenize_split(
+            input_path,
+            output_path,
+            args.model,
+            args.max_length,
+            args.truncation,
+            args.workers,
+            args.metadata_columns,
+        )
         all_stats[split] = stats
         print(f"  {stats}")
         if stats["errors"] and not args.allow_errors:
