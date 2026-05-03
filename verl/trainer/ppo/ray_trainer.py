@@ -465,6 +465,26 @@ class RayPPOTrainer:
                 dump_path=rollout_data_dir,
             )
 
+    @staticmethod
+    def _reward_extra_scalar_metrics(reward_extra_infos_dict: dict[str, list]) -> dict[str, float]:
+        """Aggregate scalar reward-extra fields during training.
+
+        Validation already reduces reward-extra fields through process_validation_metrics.
+        Training needs the same scalar signal for Tau3 terminal/budget diagnostics.
+        """
+        metrics: dict[str, float] = {}
+        for key, values in (reward_extra_infos_dict or {}).items():
+            if "/" not in key:
+                continue
+            try:
+                arr = np.asarray(values, dtype=np.float32)
+            except (TypeError, ValueError):
+                continue
+            if arr.size == 0 or not np.isfinite(arr).any():
+                continue
+            metrics[key] = float(np.nanmean(arr))
+        return metrics
+
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -1799,6 +1819,7 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            metrics.update(self._reward_extra_scalar_metrics(reward_extra_infos_dict))
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

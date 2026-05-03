@@ -265,6 +265,24 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    success_mask = sequence_score >= 1.0
+    success_count = int(success_mask.sum().detach().item())
+    metrics["efficiency/success_count"] = float(success_count)
+    if success_count > 0:
+        success_float = success_mask.float()
+        metrics["efficiency/response_tokens_per_success"] = (
+            torch.sum(response_length.float() * success_float) / success_float.sum()
+        ).detach().item()
+        success_np = success_mask.detach().cpu().numpy().astype(bool)
+        if "__num_turns__" in batch.non_tensor_batch:
+            metrics["efficiency/turns_per_success"] = float(
+                np.mean(np.asarray(batch.non_tensor_batch["__num_turns__"])[success_np])
+            )
+        if "tool_call_counts" in batch.non_tensor_batch:
+            metrics["efficiency/tool_calls_per_success"] = float(
+                np.mean(np.asarray(batch.non_tensor_batch["tool_call_counts"])[success_np])
+            )
+
     return metrics
 
 

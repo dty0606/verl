@@ -14,6 +14,7 @@
 
 
 import torch
+import torch.distributed as dist
 from tensordict import TensorDict
 
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
@@ -113,7 +114,12 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             teacher_log_prob = teacher_log_prob.squeeze(-1)
         sdpo_loss_mask = data.get("self_distillation_loss_mask", response_mask).to(response_mask.dtype)
         sdpo_loss_mask = sdpo_loss_mask * data["self_distillation_mask"].to(sdpo_loss_mask.dtype).unsqueeze(1)
-        if sdpo_loss_mask.sum().item() == 0:
+        sdpo_batch_num_tokens = sdpo_loss_mask.sum().to(log_prob.device)
+        sdpo_global_batch_size = (sdpo_loss_mask.sum(dim=-1) > 0).sum().to(log_prob.device)
+        if dp_group is not None and dist.is_available() and dist.is_initialized():
+            dist.all_reduce(sdpo_batch_num_tokens, op=dist.ReduceOp.SUM, group=dp_group)
+            dist.all_reduce(sdpo_global_batch_size, op=dist.ReduceOp.SUM, group=dp_group)
+        if sdpo_batch_num_tokens.item() == 0:
             pg_loss = log_prob.sum() * 0.0
             pg_metrics = {
                 "actor/pg_clipfrac": 0.0,
@@ -138,7 +144,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
                 loss_mat=per_token_loss,
                 loss_mask=sdpo_loss_mask,
                 loss_agg_mode=loss_agg_mode,
-                batch_num_tokens=sdpo_loss_mask.sum().clamp(min=1.0),
+                dp_size=config.global_batch_info["dp_size"],
+                batch_num_tokens=sdpo_batch_num_tokens.clamp(min=1.0),
+                global_batch_size=sdpo_global_batch_size.clamp(min=1.0),
+                loss_scale_factor=config.loss_scale_factor,
             ) * float(config.policy_loss.get("sdpo_loss_coef", 1.0))
             pg_metrics = {
                 "actor/pg_clipfrac": 0.0,

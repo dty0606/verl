@@ -181,6 +181,14 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         feedback = json.dumps(feedback, ensure_ascii=False, sort_keys=True)
 
     runtime = str(live_result.get("runtime") or extra_info.get("tau3_runtime") or "").lower()
+    terminal = float(_is_terminal_live_result(live_result))
+    terminal_reason = str(live_result.get("terminal_reason") or "").lower()
+    budget_exhausted = float(
+        terminal_reason in {"truncated", "max_steps", "max_user_turns"}
+        or reward_source == "official_gym_nonterminal_snapshot"
+    )
+    turn_count = float(live_result.get("turn_count") or 0.0)
+    tool_count = float(len(live_result.get("executed_tools") or []))
     official_reward_path_violation = float(
         runtime == "official_gym" and _is_terminal_live_result(live_result) and reward_source != "official_or_runtime"
     )
@@ -195,8 +203,16 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         "feedback_renderer": renderer,
         "reward_source": reward_source,
         "tau3_live/reward_source_official_fraction": 1.0 if reward_source == "official_or_runtime" else 0.0,
+        "tau3_live/reward_source_nonterminal_fraction": (
+            1.0 if reward_source == "official_gym_nonterminal_snapshot" else 0.0
+        ),
         "tau3_live/reward_source_proxy_fallback_fraction": 1.0 if reward_source == "legacy_proxy_heuristic" else 0.0,
         "tau3_live/reward_source_official_violation_fraction": official_reward_path_violation,
+        "tau3_live/terminal_fraction": terminal,
+        "tau3_live/nonterminal_fraction": 1.0 - terminal,
+        "tau3_live/budget_exhausted_fraction": budget_exhausted,
+        "tau3_live/turn_count": turn_count,
+        "tau3_live/tool_count": tool_count,
     }
     result.update(diagnostic_metrics)
 

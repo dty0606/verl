@@ -604,7 +604,7 @@ bash run_local_tau3_grpo_live_p5.sh \
 Pass criteria:
 - Decoded assistant output is not gibberish
 - `tau3_live_result` appears in rollout/reward fields
-- Nonzero `actor/pg_loss` or `actor/grad_norm`
+- Finite `actor/pg_loss` / `actor/grad_norm`; nonzero update is expected only if the rollout group has reward variance
 
 **Stop if decoded output is corrupted.**
 
@@ -613,6 +613,10 @@ Pass criteria:
 ## Recipe 8: Full GRPO Baseline
 
 Run only after SFT checkpoint passes vLLM serve + one-step GRPO smoke.
+This is the SDPO-paper companion GRPO baseline, not a separate DeepSeekMath-reference
+GRPO ablation: rollout `n=8`, rollout IS clip `2`, and KL coefficient `0.0`.
+The response/model length budget is larger than the paper's single-shot code setup
+because Tau3 airline rollouts are multi-turn.
 
 ```bash
 cd ~/verl_tau3_sdpo
@@ -625,9 +629,9 @@ export ENABLE_THINKING=true
 export VLLM_LANGUAGE_MODEL_ONLY=true
 export N_GPUS_PER_NODE=8
 export ROLLOUT_TP_SIZE=1
-export TRAIN_BATCH_SIZE=12
+export TRAIN_BATCH_SIZE=8
 export ROLLOUT_BATCH_SIZE=8
-export PPO_MINI_BATCH_SIZE=12
+export PPO_MINI_BATCH_SIZE=32
 export VAL_N=4
 export TOTAL_TRAINING_STEPS=300
 export TOTAL_EPOCHS=300
@@ -636,8 +640,8 @@ export SAVE_FREQ=30
 export LR=1e-6
 export LR_WARMUP_STEPS=0
 export MAX_PROMPT_LENGTH=16384
-export MAX_RESPONSE_LENGTH=4096
-export MAX_MODEL_LEN=24576
+export MAX_RESPONSE_LENGTH=12288
+export MAX_MODEL_LEN=32768
 export ROLLOUT_TEMPERATURE=0.4
 export ROLLOUT_TOP_P=0.95
 export VAL_TEMPERATURE=0.4
@@ -712,12 +716,69 @@ Pass criteria:
 
 ---
 
+## Recipe 10: Full Vanilla SDPO Baseline
+
+Run only after Recipe 9 passes. Keep all shared rollout settings identical to
+Recipe 8 so GRPO and SDPO remain an apples-to-apples comparison; the only
+algorithmic difference should be `loss_mode=sdpo` plus the feedback teacher path.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+export HF_CKPT=<path to final SFT global_step_*/huggingface>
+export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
+export TAU3_LIVE_RUNTIME=official_gym
+export MODEL_PATH="$HF_CKPT"
+export ENABLE_THINKING=true
+export VLLM_LANGUAGE_MODEL_ONLY=true
+export N_GPUS_PER_NODE=8
+export ROLLOUT_TP_SIZE=1
+export TRAIN_BATCH_SIZE=8
+export ROLLOUT_BATCH_SIZE=8
+export PPO_MINI_BATCH_SIZE=32
+export VAL_N=4
+export TOTAL_TRAINING_STEPS=300
+export TOTAL_EPOCHS=300
+export TEST_FREQ=30
+export SAVE_FREQ=30
+export LR=1e-6
+export LR_WARMUP_STEPS=0
+export MAX_PROMPT_LENGTH=16384
+export MAX_RESPONSE_LENGTH=12288
+export MAX_MODEL_LEN=32768
+export SDPO_ALPHA=1.0
+export SDPO_LOSS_COEF=1.0
+export SDPO_IS_CLIP=2.0
+export SDPO_MAX_REPROMPT_LEN=8192
+export SDPO_REPROMPT_TRUNCATION=right
+export ROLLOUT_TEMPERATURE=0.4
+export ROLLOUT_TOP_P=0.95
+export VAL_TEMPERATURE=0.4
+export VAL_TOP_P=0.95
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+
+ROLLOUT_DATA_DIR=outputs/sdpo_full_sft_baseline/rollout_data \
+bash run_local_tau3_sdpo_live_p5.sh \
+  datasets/tau3_live_airline_canonical_json \
+  sdpo_full_sft_baseline \
+  json \
+  2>&1 | tee logs/sdpo_full_sft_baseline.log
+```
+
+Track at minimum: terminal/nonterminal fractions, budget-exhausted fraction,
+turn/tool counts, response clip ratio, success count, tokens per success,
+`self_distillation/reprompt_sample_fraction`, `feedback_used_fraction`,
+`teacher_prompt_saturation_fraction`, finite `actor/pg_loss`, and sane
+`actor/grad_norm`.
+
+---
+
 ## Historical Notes
 
 - Old LoRA SFT looked good in standalone eval but produced 50-72% garbage in VERL agent loop rollouts
 - Old `model_type=qwen3_5_text` / `Qwen3_5ForCausalLM` checkpoints required manual config patching — abandoned
-- Qwen3.5 chat template strips `<think>` from non-final assistant messages — turn-per-row SFT is required
-- VERL `MultiTurnSFTDataset` per-turn tokenization is incompatible with Qwen3.5 strict template — use `TurnSFTDataset`
+- Qwen3.5 stock chat template strips `<think>` from non-final assistant messages; for full-trajectory SFT use the custom preserve-thinking template and pre-tokenized full-trajectory dataset
+- VERL `MultiTurnSFTDataset` per-turn tokenization is incompatible with Qwen3.5 strict template; use `PretokenizedSFTDataset` for full trajectories or `TurnSFTDataset` only for the earlier turn-per-row ablation
 - Qwen3.5-4B chosen as primary seed: same pass@1/best@4 as 27B, 4-15× cheaper
 - 1K full-param thinking SFT pilot overfit → use 1 epoch for 5K+ data
 - 9,198 successful thinking-on trajectories generated (Bedrock Opus 4.6 agent, Sonnet 4.6 user sim)

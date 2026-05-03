@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Vanilla GRPO baseline for tau3 live on latest VERL.
+# SDPO-paper companion GRPO baseline for tau3 live on latest VERL.
 #
 # Usage:
 #   ./run_local_tau3_grpo_live_p5.sh <task_path> [experiment_name_suffix] [feedback_mode]
@@ -54,16 +54,16 @@ ARGS=(
     --config-name=tau3_grpo_live
     "data.train_files=$TASK_DIR/train.parquet"
     "data.val_files=$TASK_DIR/test.parquet"
-    "data.train_batch_size=${TRAIN_BATCH_SIZE:-12}"
-    "data.val_batch_size=${VAL_BATCH_SIZE:-${TRAIN_BATCH_SIZE:-12}}"
+    "data.train_batch_size=${TRAIN_BATCH_SIZE:-8}"
+    "data.val_batch_size=${VAL_BATCH_SIZE:-${TRAIN_BATCH_SIZE:-8}}"
     "data.max_prompt_length=${MAX_PROMPT_LENGTH:-16384}"
-    "data.max_response_length=${MAX_RESPONSE_LENGTH:-4096}"
+    "data.max_response_length=${MAX_RESPONSE_LENGTH:-12288}"
     "+data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING:-true}"
-    "max_model_len=${MAX_MODEL_LEN:-24576}"
+    "max_model_len=${MAX_MODEL_LEN:-32768}"
     "actor_rollout_ref.model.path=$MODEL_PATH"
     "actor_rollout_ref.actor.optim.lr=${LR:-1e-6}"
     "actor_rollout_ref.actor.optim.lr_warmup_steps=${LR_WARMUP_STEPS:-0}"
-    "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-12}"
+    "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-32}"
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
     "actor_rollout_ref.actor.policy_loss.loss_mode=vanilla"
     "actor_rollout_ref.rollout.n=${ROLLOUT_BATCH_SIZE:-8}"
@@ -93,7 +93,7 @@ if [ -n "${VLLM_LANGUAGE_MODEL_ONLY:-}" ]; then
 fi
 
 echo "----------------------------------------------------------------"
-echo "Starting latest-VERL tau3 GRPO baseline"
+echo "Starting latest-VERL tau3 GRPO baseline (SDPO-paper companion config)"
 echo "Experiment: $EXP_NAME"
 echo "Model: $MODEL_PATH"
 echo "Task dir: $TASK_DIR"

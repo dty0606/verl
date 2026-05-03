@@ -237,11 +237,22 @@ Verified in the new repo:
   - `timing_s/sdpo_teacher=0.90s` (extra teacher forward cost on top of the GRPO pipeline)
 - Both runs show coherent Qwen3.5 tool-call output (`get_user_details`, `get_reservation_details` with valid JSON args); no gibberish.
 - All five stop-if triggers from the Codex handoff were avoided (dataset nonempty, Hydra compose succeeded, decoded output coherent, reprompt fraction nonzero, SDPO loss finite and shape-stable).
-- Known open concerns to QC before claim runs (see Codex handoff note):
+- Known open concerns to QC before claim runs (see Codex handoff note; first item resolved by Guardian QC local patch below):
   - Codex SDPO path calls `agg_loss` without `**config.global_batch_info`, so `dp_size` defaults to 1 for SDPO and scales absolute loss magnitude per rank differently from the vanilla path.
   - SDPO path reports `actor/ppo_kl=0` instead of a real KL diagnostic; the stored value comes from a separate `masked_mean(log_prob - old_log_prob)` not surfaced to the main metric key.
   - Reprompt builder assumes `raw_prompt[-1]["content"]` is the initial user task (holds for current tau3 airline data, but should be asserted).
   - `self_distillation_mask` becomes `self_distillation_loss_mask * mask.unsqueeze(1)`, and the empty-target fallback still runs `log_prob.sum() * 0.0`; verify this does not produce spurious autograd warnings in FSDP.
+
+### 2026-05-03 Guardian QC before full SFT/RL
+
+- Added `research/migration/grpo_sdpo_algorithm_fidelity_qc.md` as the written Guardian Gate report for full-traj SFT, GRPO, and SDPO fidelity.
+- Full-traj SFT verdict: go. Builder, preserve-thinking template, pre-tokenized `input_ids`/`loss_mask`, and smoke checkpoint path are coherent. Operational requirement: patch exported checkpoint tokenizers with `scripts/qwen35/patch_chat_template_preserve_thinking.py` before vLLM/VERL rollout.
+- SDPO verdict: one real multi-GPU scaling bug was found and patched locally in `verl/workers/utils/losses.py`. The SDPO selected-token loss now all-reduces selected-token and selected-sequence counts across `dp_group` before the empty-target branch, then passes global counts plus `dp_size` into `agg_loss`.
+- GRPO verdict: current Tau3 config should be named the SDPO-paper companion GRPO baseline, not literal DeepSeekMath-reference GRPO. This follows the SDPO paper's GRPO comparison setup (`rollout.n=8`, rollout IS clip `2`, KL coefficient `0.0`) while adapting the length budget to Tau3 multi-turn airline rollouts.
+- Metrics patch: Tau3 reward scoring now logs terminal/nonterminal fraction, budget-exhausted fraction, turn count, tool count, and reward-source fractions during training. PPO data metrics now log success count plus successful-trajectory response tokens, turns, and tool calls.
+- Shared full-run defaults: GRPO and SDPO launchers now default to `MAX_PROMPT_LENGTH=16384`, `MAX_RESPONSE_LENGTH=12288`, `MAX_MODEL_LEN=32768`, `ROLLOUT_BATCH_SIZE=8`, and `PPO_MINI_BATCH_SIZE=32` for comparable Tau3 multi-turn baselines.
+- Smoke verdict: GRPO and SDPO wiring both passed. GRPO had zero actor update because all rewards were zero; SDPO produced a finite nonzero feedback-driven update. These smokes prove engineering shape and feedback wiring, not model quality.
+- Remaining pre-claim checks: verify terminal official reward extraction in a short real-SFT smoke, assert or harden the `raw_prompt[-1]` user-task assumption, document that current SDPO is sampled-token reverse-KL rather than full top-k logit distillation, and pin identical GRPO/SDPO env snapshots for fair baseline runs.
 
 ## Evidence Carried Forward
 
@@ -258,8 +269,8 @@ From the old repo:
 - Does latest VERL SFT accept Qwen3.5 thinking traces and tau3 assistant-first conversations without local template hacks on P5?
 - Can latest VERL export a VLM-format `hf_model` for Qwen3.5-4B SFT, with `model_type=qwen3_5` and `Qwen3_5ForConditionalGeneration` preserved?
 - Can vLLM serve that exact SFT export with `--language-model-only`, and can the current Tau3 interaction-enabled `tool_agent` pass a one-step official-gym GRPO rollout smoke on P5?
-- Does the new vanilla SDPO latest-VERL path match the original SDPO paper's vanilla target construction end-to-end, beyond "finite actor update from failed reprompt targets"?
-- Does the new vanilla SDPO latest-VERL path scale `pg_loss` consistently with the GRPO path across FSDP ranks, given the current `agg_loss` call bypasses `config.global_batch_info`?
+- Does the sampled-token vanilla SDPO latest-VERL path deliver learning gains versus the SDPO-paper companion GRPO baseline after full-traj SFT?
+- If the paper later needs a literal DeepSeekMath-reference GRPO ablation, add it as a separate explicitly named ablation rather than changing the main SDPO companion baseline.
 
 ## Guardrails
 
