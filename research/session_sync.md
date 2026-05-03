@@ -217,6 +217,32 @@ Verified in the new repo:
 - The analyzer also optionally decodes assistant spans to estimate how assistant tokens split into `<think>`, `<tool_call>`, visible answer text, and template overhead. Those subcomponent counts are approximate; role/turn/token-boundary counts are exact.
 - Use this audit before choosing RL `MAX_PROMPT_LENGTH`, `MAX_RESPONSE_LENGTH`, `MAX_MODEL_LEN`, and rollout batch size. It should report prompt-length threshold risks for 4K/8K/16K/24K/32K and P50/P90/P95/max context growth by assistant turn.
 
+### 2026-05-03 SDPO smoke passed, paired bundles archived for deep QC
+
+- Kiro ran one-step vanilla SDPO smoke on P5 with commit `4dac3be5` (Codex port) against the same full-traj 10-step SFT checkpoint used by the GRPO smoke.
+- Both runs share the same HF checkpoint, same canonical airline JSON dataset, same prompt/response lengths, same wall clock step time (~46.6s), so they are fair ground for engineering QC comparison of GRPO vs SDPO.
+- Paired artifacts archived at:
+  - `research/diagnostics/grpo_fulltraj_smoke_full.zip` (full log + rollouts, 8 trajectories)
+  - `research/diagnostics/sdpo_vlm_sft_smoke.zip` (full log + rollouts, 8 trajectories)
+- GRPO step 1 metrics (expected zero actor update, no learning signal from undertrained SFT):
+  - `actor/pg_loss=0.0`, `actor/grad_norm=0.0`, `actor/entropy=0.05688`, `actor/ppo_kl=0`
+  - `critic/rewards/mean=0.0` — every rollout scored 0.0, so GRPO advantage collapses to 0 (no group variance)
+- SDPO step 1 metrics (finite actor update driven by feedback-augmented teacher reprompt):
+  - `actor/pg_loss=-0.0315`, `actor/grad_norm=33.81`, `actor/entropy=0.06257`, `actor/ppo_kl=0` (SDPO path fixes ppo_kl=0 for now)
+  - `self_distillation/reprompt_sample_fraction=1.0`
+  - `self_distillation/feedback_available_fraction=1.0`, `feedback_used_fraction=1.0`
+  - `self_distillation/failure_fraction=1.0`, `success_sample_fraction=0.0`
+  - `self_distillation/teacher_prompt_token_mean=2111.375`, `teacher_prompt_saturation_fraction=0.0` (no truncation; well under `max_reprompt_len=8192`)
+  - `self_distillation/empty_target_batch=0.0`, `teacher_selected_fraction=1.0`, `token_fraction=1.0`
+  - `timing_s/sdpo_teacher=0.90s` (extra teacher forward cost on top of the GRPO pipeline)
+- Both runs show coherent Qwen3.5 tool-call output (`get_user_details`, `get_reservation_details` with valid JSON args); no gibberish.
+- All five stop-if triggers from the Codex handoff were avoided (dataset nonempty, Hydra compose succeeded, decoded output coherent, reprompt fraction nonzero, SDPO loss finite and shape-stable).
+- Known open concerns to QC before claim runs (see Codex handoff note):
+  - Codex SDPO path calls `agg_loss` without `**config.global_batch_info`, so `dp_size` defaults to 1 for SDPO and scales absolute loss magnitude per rank differently from the vanilla path.
+  - SDPO path reports `actor/ppo_kl=0` instead of a real KL diagnostic; the stored value comes from a separate `masked_mean(log_prob - old_log_prob)` not surfaced to the main metric key.
+  - Reprompt builder assumes `raw_prompt[-1]["content"]` is the initial user task (holds for current tau3 airline data, but should be asserted).
+  - `self_distillation_mask` becomes `self_distillation_loss_mask * mask.unsqueeze(1)`, and the empty-target fallback still runs `log_prob.sum() * 0.0`; verify this does not produce spurious autograd warnings in FSDP.
+
 ## Evidence Carried Forward
 
 From the old repo:
@@ -232,7 +258,8 @@ From the old repo:
 - Does latest VERL SFT accept Qwen3.5 thinking traces and tau3 assistant-first conversations without local template hacks on P5?
 - Can latest VERL export a VLM-format `hf_model` for Qwen3.5-4B SFT, with `model_type=qwen3_5` and `Qwen3_5ForConditionalGeneration` preserved?
 - Can vLLM serve that exact SFT export with `--language-model-only`, and can the current Tau3 interaction-enabled `tool_agent` pass a one-step official-gym GRPO rollout smoke on P5?
-- Does the new vanilla SDPO latest-VERL path produce nonzero reprompt targets and finite actor updates in the first P5 smoke?
+- Does the new vanilla SDPO latest-VERL path match the original SDPO paper's vanilla target construction end-to-end, beyond "finite actor update from failed reprompt targets"?
+- Does the new vanilla SDPO latest-VERL path scale `pg_loss` consistently with the GRPO path across FSDP ranks, given the current `agg_loss` call bypasses `config.global_batch_info`?
 
 ## Guardrails
 
