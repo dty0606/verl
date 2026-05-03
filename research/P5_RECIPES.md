@@ -48,20 +48,41 @@ and large logs in S3 or P5-local. Do not commit them to GitHub.
 
 ---
 
-## SFT Format: Turn-Per-Row
+## SFT Format Decision: Full-Trajectory Smoke Lane
 
-All SFT recipes use **turn-per-row** format (AReaL Tau2 style):
+Current priority: restore the strongest known SFT contract from the old LoRA
+run: **one full successful trajectory per row, thinking-on, assistant-only loss
+across all assistant turns**.
+
+Why this changed from the 5K turn-row pilot:
+
+- The turn-row VLM SFT pipeline worked mechanically, but paired eval regressed
+  on policy/endpoint decisions such as task 30 and task 37.
+- The old LoRA baseline saw full trajectories with historical assistant
+  thinking and tool history, and behaved better on the same kind of decisions.
+- The likely issue is context/template mismatch, not generic SFT convergence.
+
+The full-trajectory path must use a patched Qwen3.5 chat template that preserves
+historical assistant `<think>` blocks. The stock Qwen3.5 thinking template can
+strip old reasoning in multi-turn renders.
+
+Historical turn-row format remains useful for ablations:
 
 ```text
 messages = prior conversation history (thinking stripped from historical assistants)
 answer   = current assistant target with thinking/content/tool_calls
 ```
 
+Dataset class for training is still `PretokenizedSFTDataset`; the difference is
+which offline pre-tokenizer produced `input_ids` and `loss_mask`.
+
+<!-- Historical turn-row note retained below for audit context:
 This is required because Qwen3.5 strips historical assistant reasoning during
 full multi-turn chat-template rendering. Each row trains one assistant action
 given history — matching rollout inference.
 
 Dataset class: `TurnSFTDataset` via `+data.custom_cls` hydra override.
+-->
 
 ---
 
@@ -119,6 +140,114 @@ print(f'rejected_reasons: {m[\"rejected_reasons\"]}')
 ```
 
 Expected: ~82K accepted turn-rows from ~9K successful trajectories, ~7K rejected (failed trajectories).
+
+---
+
+## Recipe 1F: Build Full-Trajectory SFT Smoke Dataset
+
+Use this before any new real SFT run. It creates one row per accepted successful
+trajectory, preserving all stitched assistant thinking/tool history.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+python3 scripts/tau3/build_protocol_sft_data.py \
+  --input ~/SDPO-qwen35/outputs/tau3_protocol_candidates_thinking_5k_b2 \
+  --input ~/SDPO-qwen35/outputs/tau3_protocol_candidates_thinking_5k \
+  --input ~/SDPO-qwen35/outputs/tau3_protocol_candidates_thinking_v1 \
+  --output-dir datasets/tau3_sft_full_traj_smoke \
+  --train-only-holdout \
+  --include-thinking-traces \
+  --sft-format trajectory \
+  --max-rows-per-task 20 \
+  --overwrite
+```
+
+Verify:
+
+```bash
+python3 - <<'PY'
+import json
+m = json.load(open("datasets/tau3_sft_full_traj_smoke/manifest.json"))
+print("format", m["sft_format"], "train", m["train_rows"], "test", m["test_rows"])
+print("thinking modes", m["thinking_supervision_modes"])
+assert m["sft_format"] == "trajectory"
+assert m["train_rows"] > 0 and m["test_rows"] > 0
+assert m["accepted_rows_containing_reasoning_traces"] == m["accepted_rows"]
+print("PASS: full-traj smoke parquet built with thinking traces")
+PY
+```
+
+---
+
+## Recipe 2F: Pre-Tokenize Full Trajectory With Patched Template
+
+This applies the local preserve-thinking Qwen3.5 chat template and writes
+`input_ids`/`loss_mask` for `PretokenizedSFTDataset`.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+python3 scripts/tau3/pretokenize_full_traj_sft.py \
+  --input datasets/tau3_sft_full_traj_smoke \
+  --output datasets/tau3_sft_full_traj_smoke_pretok \
+  --model Qwen/Qwen3.5-4B \
+  --max-length 32768 \
+  --truncation error \
+  --workers 8 \
+  --audit-samples 5 \
+  2>&1 | tee logs/pretokenize_full_traj_sft_smoke.log
+```
+
+If overlength rows make the smoke fail, rerun only for debugging with
+`--allow-errors` and inspect `manifest.json`. Do not use silent truncation for a
+claim run until the row-length distribution is understood.
+
+Pass criteria:
+
+- `errors == 0` for both train/test in the first clean smoke, or a clearly
+  documented small overlength-only error count in a debugging run.
+- `avg_labeled_tokens > 0`.
+- `avg_assistant_count > 1`, proving this is actually full trajectory.
+- `*.audit.jsonl` decoded spans include old `<think>` and tool names.
+
+---
+
+## Recipe 4F: Ten-Step Full-Trajectory SFT Smoke
+
+```bash
+cd ~/verl_tau3_sdpo
+
+REPORT_TO='["console"]' \
+MODEL_PATH=Qwen/Qwen3.5-4B \
+CHECKPOINT_SAVE_CONTENTS='["model","optimizer","extra","hf_model"]' \
+NUM_GPUS=8 TOTAL_EPOCHS=1 SAVE_FREQ=10 TEST_FREQ=10 \
+MAX_LENGTH=32768 MAX_TOKEN_LEN_PER_GPU=32768 \
+TRAIN_BATCH_SIZE=8 MICRO_BATCH_SIZE_PER_GPU=1 \
+USE_LIGER=true LR=1e-5 TRUNCATION=error \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+bash scripts/tau3/run_tau3_verl_sft_full_thinking.sh \
+  datasets/tau3_sft_full_traj_smoke_pretok \
+  qwen35_4b_vlm_full_traj_sft_10step_smoke \
+  data.custom_cls.path=verl/utils/dataset/pretokenized_sft_dataset.py \
+  data.custom_cls.name=PretokenizedSFTDataset \
+  engine.use_torch_compile=False \
+  model.use_fused_kernels=False \
+  trainer.total_training_steps=10 \
+  trainer.max_ckpt_to_keep=1 \
+  2>&1 | tee logs/sft_full_traj_10step_smoke.log
+```
+
+After checkpoint export, patch the saved tokenizer to the same template:
+
+```bash
+export HF_CKPT=$(ls -d checkpoints/SDPO/tau3_verl_sft/*full_traj_sft_10step_smoke*/global_step_*/huggingface | tail -1)
+python3 scripts/qwen35/patch_chat_template_preserve_thinking.py "$HF_CKPT"
+```
+
+Then run the normal VLM-format check, vLLM smoke, and one-step GRPO smoke. Stop
+if the patched checkpoint cannot load or if the rollout prompt drops historical
+assistant `<think>`.
 
 ---
 

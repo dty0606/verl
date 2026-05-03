@@ -178,6 +178,16 @@ Verified in the new repo:
 - Aggregation now reports tau-style finite-sample `pass^k` using `comb(successes, k) / comb(trials, k)` rather than `p1 ** k`.
 - Runtime note: the wrapper still defaults `EVAL_SCRIPT=$HOME/SDPO-qwen35/scripts/eval_tau3_base_models.py`, so P5/Kiro must either keep the old repo at that path or override `EVAL_SCRIPT` explicitly.
 
+### 2026-05-03 Full-trajectory thinking SFT smoke lane
+
+- Paired diagnostics on task 30/37 suggest the balanced 5K turn-row SFT is mechanically valid but loses policy/endpoint behavior relative to base/old LoRA; likely cause is context/template mismatch rather than generic convergence.
+- Current decision: restore the old LoRA-style SFT contract first: one successful full trajectory per row, thinking-on, assistant-only loss across all assistant turns.
+- Added `verl/utils/dataset/qwen35_preserve_thinking_template.py`, a local ChatML/Qwen XML tool-call template that preserves historical assistant `<think>` blocks.
+- Added `scripts/tau3/pretokenize_full_traj_sft.py`, which reads `--sft-format trajectory` parquet, installs the preserve-thinking template in-memory, audits decoded assistant spans, and writes `input_ids`/`loss_mask` for `PretokenizedSFTDataset`.
+- Added `scripts/qwen35/patch_chat_template_preserve_thinking.py` to patch exported HF checkpoints so vLLM/VERL rollout loads the same chat template used by full-traj SFT pre-tokenization.
+- Updated `research/P5_RECIPES.md` with `Recipe 1F/2F/4F`: build capped full-traj smoke parquet, pretokenize with patched template, run 10-step SFT smoke, patch checkpoint tokenizer, then run VLM/vLLM/GRPO smoke.
+- Local Windows QC can only cover static/script checks; P5 remains the source of truth for Qwen3.5 tokenizer rendering, CUDA SFT, vLLM serving, and VERL rollout prompt consistency.
+
 ## Evidence Carried Forward
 
 From the old repo:
