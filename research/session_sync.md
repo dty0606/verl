@@ -300,6 +300,14 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - Bathtub val_loss pattern is canonical for full-param SFT at constant LR; pattern is benign, epoch-2 is optional.
 - Next phase (Phase B): vanilla GRPO and vanilla SDPO full baselines from `REAL_SFT_CKPT`, evaluated on canonical test20 with paired grid (3 seeds, val_n=4) for the paper's main comparison table.
 
+### 2026-05-04 Tau3 validation metric aliases
+
+- Added explicit Tau3-facing validation aliases on top of VERL's native `val-core/val-aux` metrics. Raw VERL metrics remain logged for debugging.
+- New aliases include `val/pass^1`, `val/pass^2`, ..., up to the configured validation repeat count, plus per-source versions such as `val/tau3_live/pass^4`.
+- Important correction: VERL `best@K/mean` is a best-of-K/bootstrap metric, not Tau3 reliability `pass^K`. The new aliases compute `pass^K` exactly per prompt as `C(successes, K) / C(trials, K)` and then average across prompts, matching the paired eval script's convention.
+- Added compact health aliases for dashboard use: `val/incorrect_format`, `val/nonterminal_fraction`, `val/budget_exhausted_fraction`, `val/turn_count`, and `val/tool_count` when those fields are present in reward extras.
+- Dashboard recommendation: use the new `val/pass^K` aliases for Tau3-facing curves and keep the existing VERL expanded metrics hidden but available for postmortem/debugging.
+
 ## Evidence Carried Forward
 
 From the old repo:

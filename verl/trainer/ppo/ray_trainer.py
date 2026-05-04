@@ -44,10 +44,12 @@ from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
+    add_validation_metric_aliases,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
+    compute_validation_pass_pow_metrics,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
@@ -660,6 +662,7 @@ class RayPPOTrainer:
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+        data_src2pass_pow = compute_validation_pass_pow_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
@@ -676,6 +679,8 @@ class RayPPOTrainer:
                         metric_sec = "val-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
+
+        add_validation_metric_aliases(metric_dict, data_src2var2metric2val, data_src2pass_pow)
 
         if len(sample_turns) > 0:
             sample_turns = np.concatenate(sample_turns)

@@ -18,6 +18,7 @@ Metrics related to the PPO trainer.
 import logging
 from collections import defaultdict
 from functools import partial
+from math import comb
 from typing import Any, Callable
 
 import numpy as np
@@ -28,6 +29,95 @@ from verl import DataProto
 from verl.utils.import_utils import deprecated
 
 logger = logging.getLogger(__name__)
+
+
+def _pass_pow(success_count: int, trial_count: int, k: int) -> float:
+    """Estimate Tau3/tau-bench pass^k reliability from repeated validation trials.
+
+    Unlike VERL's best@k metric, pass^k asks whether k sampled attempts are all
+    successful. For binary success rewards this is C(successes, k) / C(trials, k).
+    """
+    if k <= 0 or trial_count < k or success_count < k:
+        return 0.0
+    return float(comb(success_count, k) / comb(trial_count, k))
+
+
+def compute_validation_pass_pow_metrics(
+    data_sources: list[str],
+    sample_uids: list[str],
+    infos_dict: dict[str, list[Any]],
+) -> dict[str, dict[str, float]]:
+    """Compute explicit pass^k validation metrics from repeated samples per prompt.
+
+    VERL already emits mean@N/best@N/worst@N/maj@N. Tau3 reporting uses pass^k,
+    which is a stricter all-k-success reliability metric and should not be
+    inferred from best@k.
+    """
+    core_key = "acc" if "acc" in infos_dict else "reward" if "reward" in infos_dict else None
+    if core_key is None:
+        return {}
+
+    data_src2uid2vals = defaultdict(lambda: defaultdict(list))
+    core_vals = infos_dict[core_key]
+    for sample_idx, data_source in enumerate(data_sources):
+        if sample_idx >= len(sample_uids) or sample_idx >= len(core_vals):
+            continue
+        try:
+            val = float(core_vals[sample_idx])
+        except (TypeError, ValueError):
+            continue
+        data_src2uid2vals[str(data_source)][str(sample_uids[sample_idx])].append(val)
+
+    data_src2pass_pow = {}
+    for data_source, uid2vals in data_src2uid2vals.items():
+        k2vals = defaultdict(list)
+        for vals in uid2vals.values():
+            trial_count = len(vals)
+            success_count = sum(1 for val in vals if val >= 1.0)
+            for k in range(1, trial_count + 1):
+                k2vals[k].append(_pass_pow(success_count, trial_count, k))
+        data_src2pass_pow[data_source] = {
+            f"pass^{k}": float(np.mean(vals)) for k, vals in sorted(k2vals.items()) if vals
+        }
+
+    return data_src2pass_pow
+
+
+def add_validation_metric_aliases(
+    metric_dict: dict[str, float],
+    data_src2var2metric2val: dict[str, dict[str, dict[str, float]]],
+    data_src2pass_pow: dict[str, dict[str, float]],
+) -> None:
+    """Add compact Tau3-facing aliases while preserving raw VERL metrics."""
+    single_data_source = len(data_src2var2metric2val) == 1
+
+    def add_alias(data_source: str, name: str, value: float) -> None:
+        value = float(value)
+        metric_dict[f"val/{data_source}/{name}"] = value
+        if single_data_source:
+            metric_dict[f"val/{name}"] = value
+
+    for data_source, pass_metrics in data_src2pass_pow.items():
+        for metric_name, metric_val in pass_metrics.items():
+            add_alias(data_source, metric_name, metric_val)
+
+    alias_vars = {
+        "incorrect_format": "incorrect_format",
+        "tau3_live/nonterminal_fraction": "nonterminal_fraction",
+        "tau3_live/budget_exhausted_fraction": "budget_exhausted_fraction",
+        "tau3_live/turn_count": "turn_count",
+        "tau3_live/tool_count": "tool_count",
+    }
+    for data_source, var2metric2val in data_src2var2metric2val.items():
+        for var_name, alias_name in alias_vars.items():
+            metric2val = var2metric2val.get(var_name)
+            if not metric2val:
+                continue
+            mean_keys = [key for key in metric2val if key.startswith("mean@")]
+            if not mean_keys:
+                continue
+            n_max_key = max(mean_keys, key=lambda key: int(key.split("@", 1)[1]))
+            add_alias(data_source, alias_name, metric2val[n_max_key])
 
 
 @deprecated("verl.utils.metric.reduce_metrics")
