@@ -41,6 +41,7 @@ THINKING_MODE="${THINKING_MODE:-on}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 USER_MODEL="${TAU3_LIVE_USER_MODEL:-us.anthropic.claude-sonnet-4-6}"
 NUM_GPUS="${NUM_GPUS:-8}"
+TASK_SPLIT="${TASK_SPLIT:-test}"
 
 # --- Paths ---
 EVAL_SCRIPT="${EVAL_SCRIPT:-$HOME/SDPO-qwen35/scripts/eval_tau3_base_models.py}"
@@ -94,6 +95,7 @@ cat > "${OUTPUT_ROOT}/eval_config.json" <<EOF
   "eval_seeds": "$(echo $EVAL_SEEDS)",
   "eval_n": $EVAL_N,
   "test_task_ids": "$TEST_TASK_IDS",
+  "task_split": "$TASK_SPLIT",
   "max_steps": $MAX_STEPS,
   "temperature": $TEMPERATURE,
   "top_p": $TOP_P,
@@ -129,7 +131,7 @@ for seed in $EVAL_SEEDS; do
             --models "$MODEL_PATH" \
             --task-ids "${TASK_GROUPS[$gpu]}" \
             --val-n "$EVAL_N" \
-            --task-split test \
+            --task-split "$TASK_SPLIT" \
             --max-steps "$MAX_STEPS" \
             --temperature "$TEMPERATURE" \
             --top-p "$TOP_P" \

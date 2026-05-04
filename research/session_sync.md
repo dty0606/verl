@@ -271,6 +271,35 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Shared full-run length defaults (`MAX_PROMPT_LENGTH=16384`, `MAX_RESPONSE_LENGTH=12288`, `MAX_MODEL_LEN=32768`) are upper bounds for RL rollout, not targets. They exist so `response_length/clip_ratio` can come down when trajectories need more room. On OOM, first step down to `MAX_MODEL_LEN=24576`, `MAX_RESPONSE_LENGTH=8192`; only then investigate microbatch or TP.
 - Codex is parked until after the first real full-traj SFT checkpoint exists. Deeper fidelity follow-ups deferred until vanilla baselines are in: rename SDPO `actor/ppo_kl` metric, assert `raw_prompt[-1]` user-task invariant, top-k logit SDPO variant.
 
+### 2026-05-04 Real full-traj SFT completed + checkpoint selection
+
+- SFT run `qwen35_4b_vlm_full_traj_sft_real_9k` completed on P5 through 2 epochs, 1,600 steps, early-stopped before epoch 2 finished after val_loss confirmed overfitting.
+- 8 checkpoints saved at steps 200, 400, 600, 800, 1000, 1200, 1400, 1600. All tokenizers patched with `scripts/qwen35/patch_chat_template_preserve_thinking.py`.
+- val/loss bathtub curve (step / val_loss):
+  - 200 / 0.5511
+  - 400 / 0.5359
+  - 600 / 0.5323 <- valley
+  - 800 / 0.5325 <- valley (tied)
+  - 1000 / 0.5466 <- epoch-2 rebound, no real recovery
+  - 1200 / 0.5470
+  - 1400 / 0.5445
+  - 1600 / 0.5499 <- highest since step 200, confirms epoch-2 overfit
+- Checkpoint selection (Phase A) evaluated steps 400/600/800/1000 on:
+  - Easy train-heldout tasks (0, 47, 49) with val_n=4 -> **all 4 ckpts score 100%**. Saturated, cannot discriminate.
+  - Mid-hard train tasks (3, 11, 23, 27, 33, 38, 41, 46) with val_n=2 -> pass@1: step 400=0.562, step 600=0.438, step 800=0.438, step 1000=0.438.
+- Hard-task ranking is statistically insignificant: SE on pass@1 at n=16 is ~0.12, 95% CI ~±0.24 -> all four ckpts overlap massively.
+- Decision (Kiro + Codex unanimous, 2026-05-04): **use step 800** as `REAL_SFT_CKPT` for RL baselines.
+  - val_loss tied valley with step 600; step 800 not worse on hard rollouts.
+  - Passes vLLM serve smoke; emits clean Qwen XML tool calls when given proper Tau3-style system prompt (the earlier Python-style test 2 was prompt-format induced, not a training bug).
+  - Tasks 0/47/49 (easy train-heldout): all SFT ckpts solve 100%, with runtime=official_gym and real multi-turn tool flows (e.g., cancel-policy-refuse + transfer_to_human_agents on task 0). No reward plumbing issue.
+- `REAL_SFT_CKPT = checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface`.
+- Selection artifacts (per-checkpoint results.json for hard + easy task sets) retained under `outputs/eval_paired/ckpt_compare_step{400,600,800,1000}{,_hard}/`.
+- Lessons carried forward for later paper write-up:
+  - Constant LR=1e-5 likely over-hot past step 600-800; next SFT run should use cosine decay with 3% warmup, min-LR ratio 0.1.
+  - SFT val split with only 3 tasks (0, 47, 49) gives a weak-per-task signal. If we rebuild SFT data, consider enlarging val to 5-7 tasks.
+  - Bathtub val_loss pattern is canonical for full-param SFT at constant LR; pattern is benign, epoch-2 is optional.
+- Next phase (Phase B): vanilla GRPO and vanilla SDPO full baselines from `REAL_SFT_CKPT`, evaluated on canonical test20 with paired grid (3 seeds, val_n=4) for the paper's main comparison table.
+
 ## Evidence Carried Forward
 
 From the old repo:
