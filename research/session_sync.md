@@ -325,6 +325,44 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - default `SDPO_MAX_REPROMPT_LEN` is now `12288` and default `SDPO_REPROMPT_TRUNCATION=error` so successful demonstrations do not silently truncate during smoke validation.
 - Guardrail for next remote run: run a short `vanilla_peer` smoke first and stop if `self_distillation/reprompt_sample_fraction=0`, `success_sample_fraction=0`, or `empty_target_batch=1.0` persists. The old fork's archived "vanilla SDPO 16-step health check" had peer-teacher flags enabled but zero selected targets, so target activation must be verified before any full baseline claim.
 
+### 2026-05-05 Operational learnings from us-east-1 P5 setup + GRPO eval
+
+**Environment setup (us-east-1 fresh P5):**
+- `conda env export --no-builds` does NOT reliably reproduce envs with `--no-deps` installs, prebuilt wheels, or editable installs. Use a setup script (`scripts/setup_env.sh`) instead.
+- Missing packages discovered iteratively: `codetiming`, `torchdata`, `accelerate`, `peft`, `qwen-vl-utils`, `toml`, `addict`, `deepdiff`, `tenacity`, `boto3`. All are tau2/verl transitive deps not captured by the YAML export.
+- flash-attn prebuilt wheel URL (`lesj0610/flash-attention`) is dead. Copy the compiled package from a working env via S3 tar.
+- tau2-bench must be installed from git at commit `220b4784` with `--no-deps`, then set `TAU2_DATA_DIR=~/tau2-bench/data` (data is a repo-level asset, not pip-distributed).
+- FlashInfer GDN kernel cache must be copied from a working machine if `nvcc` is not available. Also need `libcudart.so` symlinked to `/opt/conda/lib64/` for the linker step.
+- tokenizers version: tau2 reinstall can pull tokenizers 0.23.1 which breaks transformers 5.6.2. Pin `tokenizers==0.22.0 --no-deps`.
+
+**Disk/storage:**
+- SM CE us-east-1 space was created with 99 GB EBS (domain max was 100 GB at creation time). Changing domain max after creation does NOT resize existing volumes.
+- Moved workspace to `/mnt/sagemaker-nvme/` (28 TB instance NVMe, ephemeral) via symlink: `~/verl_tau3_sdpo → /mnt/sagemaker-nvme/verl_workspace/verl_tau3_sdpo`.
+- NVMe is ephemeral — lost on instance stop. Must sync checkpoints to S3 periodically.
+- Checkpoint save crash (`basic_ios::clear: iostream error`) was caused by 99 GB EBS being 100% full, not SDPO logic.
+
+**GRPO checkpoint format:**
+- GRPO/SDPO training saves FSDP shards (`model_world_size_8_rank_*.pt`) by default. HF export (`model.safetensors`) is only saved if `"hf_model"` is in `CHECKPOINT_SAVE_CONTENTS`.
+- The `huggingface/` subdirectory in GRPO checkpoints contains only config/tokenizer (no weights) unless `hf_model` was explicitly requested.
+- To convert FSDP shards to HF for eval/serving: `python3 scripts/legacy_model_merger.py merge --backend fsdp --local_dir <actor_dir> --target_dir <actor_dir>/hf_merged`.
+- Do NOT manually merge with `torch.save` or `safetensors.save_file` — FSDP shards have invalid storage pointers that crash safetensors.
+- For future runs: include `"hf_model"` in save contents for steps we expect to evaluate, or merge selected checkpoints post-hoc.
+
+**Experiment naming / filesystem:**
+- VERL builds experiment names from `MODEL_PATH` via `tr '/:' '--'`. With long absolute checkpoint paths, this produces 300+ char directory names that exceed filesystem limits (255 chars).
+- Workaround: symlink the merged HF checkpoint to a short path (e.g., `checkpoints/grpo_step300`) before running eval.
+- Future fix: override `MODEL_NAME` in the launcher or use a short `SUFFIX` to keep experiment names under 100 chars.
+
+**Bedrock quotas (cross-region):**
+- Sonnet 4.6 quotas: 10,000 RPM, 6,000,000 TPM (account-level, cross-region).
+- GRPO training + SDPO training + eval running simultaneously: peak ~200 RPM, ~100K TPM. Zero throttling risk.
+
+**Vanilla peer SDPO activation:**
+- Confirmed working on forced-easy tasks (0, 47, 49): step 2 had 12/64 successes → `success_sample_fraction=0.375`, `reprompt_sample_fraction=0.375`, `pg_loss=-0.145`, `grad_norm=36.37`.
+- Step 1 had 0/64 successes (all-fail batch) → `empty_target_batch=1.0`. This is expected sparsity, not a bug.
+- `teacher_prompt_saturation_fraction=0.0` at `SDPO_MAX_REPROMPT_LEN=12288` — no truncation.
+- Vanilla peer SDPO is success-gated: if no rollout in a prompt group succeeds, that group contributes zero SDPO signal. On harder random train tasks, many steps may have zero signal.
+
 ## Evidence Carried Forward
 
 From the old repo:
