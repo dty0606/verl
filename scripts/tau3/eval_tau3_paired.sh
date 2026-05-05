@@ -64,6 +64,12 @@ if [ -d "$HOME/SDPO-qwen35/verl" ]; then
     find "$HOME/SDPO-qwen35/verl" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 fi
 
+# V3 diagnostics are intentionally applied to the external historical eval
+# entrypoint when requested, because that file is outside this checkout.
+if [ "${EVAL_V3_DIAGNOSTICS:-0}" = "1" ]; then
+    python3 scripts/tau3/patch_eval_v3_diagnostics.py "$EVAL_SCRIPT"
+fi
+
 # --- Task split across GPUs ---
 # Split TEST_TASK_IDS evenly and contiguously across available GPUs. This keeps
 # the recorded eval grid and the actual launched task grid identical.
