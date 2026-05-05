@@ -101,17 +101,19 @@ tau3:
   selected_task_ids: ${oc.env:TAU3_LIVE_TASK_IDS,}
   sdpo:
     enabled: True
-    max_reprompt_len: 8192
-    reprompt_truncation: right
+    # Default to the old repo's "vanilla" SDPO arm: successful peer
+    # demonstrations as teacher context, not Tau3 feedback-only reprompting.
+    max_reprompt_len: 12288
+    reprompt_truncation: error
     success_reward_threshold: 1.0
     failure_reward_threshold: 1.0
-    include_environment_feedback: True
-    use_successful_peer_solution: False
-    only_failed_with_feedback: True
-    dont_reprompt_on_self_success: True
-    environment_feedback_only_without_solution: True
+    include_environment_feedback: False
+    use_successful_peer_solution: True
+    only_failed_with_feedback: False
+    dont_reprompt_on_self_success: False
+    environment_feedback_only_without_solution: False
     remove_thinking_from_demonstration: True
-    serialize_nonstring_feedback: True
+    serialize_nonstring_feedback: False
     reprompt_template: |-
       {prompt}{solution}{feedback}
 

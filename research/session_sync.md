@@ -308,6 +308,23 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Added compact health aliases for dashboard use: `val/incorrect_format`, `val/nonterminal_fraction`, `val/budget_exhausted_fraction`, `val/turn_count`, and `val/tool_count` when those fields are present in reward extras.
 - Dashboard recommendation: use the new `val/pass^K` aliases for Tau3-facing curves and keep the existing VERL expanded metrics hidden but available for postmortem/debugging.
 
+### 2026-05-05 SDPO vanilla-arm correction
+
+- Rechecked the old SDPO fork after the us-east-1 `sdpo_full_baseline_r16k` collapse/crash. The old repo's `SDPO_ARM=vanilla` launcher explicitly meant successful-peer teacher demonstrations with environment feedback disabled:
+  - `use_successful_peer_solution=true`
+  - `include_environment_feedback=false`
+  - `only_failed_with_feedback=false`
+  - `environment_feedback_only_without_solution=false`
+  - `dont_reprompt_on_self_success=false`
+- The latest-VERL r16k run that collapsed was not that old vanilla arm. It used the port's feedback-only defaults (`use_successful_peer_solution=false`, `include_environment_feedback=true`), so it should be described as **Tau3 feedback-only sampled SDPO**, not original/old-package vanilla SDPO.
+- Interpretation update: the r16k collapse remains useful evidence about the feedback-only/full-response-mask variant, but it is not evidence that successful-peer SDPO fails on Tau3.
+- Patched `tau3_sdpo_live.yaml` and `run_local_tau3_sdpo_live_p5.sh` to make the arm explicit:
+  - default `SDPO_ARM=vanilla_peer` restores successful-peer teacher demonstrations and disables environment feedback.
+  - `SDPO_ARM=feedback_only` preserves the previous feedback-only variant for ablation/debugging.
+  - launcher experiment names now include the arm name.
+  - default `SDPO_MAX_REPROMPT_LEN` is now `12288` and default `SDPO_REPROMPT_TRUNCATION=error` so successful demonstrations do not silently truncate during smoke validation.
+- Guardrail for next remote run: run a short `vanilla_peer` smoke first and stop if `self_distillation/reprompt_sample_fraction=0`, `success_sample_fraction=0`, or `empty_target_batch=1.0` persists. The old fork's archived "vanilla SDPO 16-step health check" had peer-teacher flags enabled but zero selected targets, so target activation must be verified before any full baseline claim.
+
 ## Evidence Carried Forward
 
 From the old repo:
