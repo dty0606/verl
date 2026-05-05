@@ -349,9 +349,11 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - For future runs: include `"hf_model"` in save contents for steps we expect to evaluate, or merge selected checkpoints post-hoc.
 
 **Experiment naming / filesystem:**
-- VERL builds experiment names from `MODEL_PATH` via `tr '/:' '--'`. With long absolute checkpoint paths, this produces 300+ char directory names that exceed filesystem limits (255 chars).
-- Workaround: symlink the merged HF checkpoint to a short path (e.g., `checkpoints/grpo_step300`) before running eval.
-- Future fix: override `MODEL_NAME` in the launcher or use a short `SUFFIX` to keep experiment names under 100 chars.
+- Historical issue: the GRPO/SDPO launchers built experiment names from `MODEL_PATH` via `tr '/:' '--'`. With long absolute checkpoint paths, this produced 300+ char W&B/checkpoint directory names that can exceed filesystem limits (255 chars).
+- Fixed in `run_local_tau3_grpo_live_p5.sh` and `run_local_tau3_sdpo_live_p5.sh`: both launchers now use a compact model alias in `trainer.experiment_name`.
+- Override explicitly with `MODEL_ALIAS=real_sft_step800` (or similar) when launching.
+- If `MODEL_ALIAS`/`MODEL_NAME` is not provided and `MODEL_PATH` contains `global_step_<N>`, the launcher auto-aliases it to `ckpt-<N>`.
+- Keep `SUFFIX` short and descriptive (`grpo_r16k_ext100`, `sdpo_vpeer_full`, etc.) so W&B and checkpoint paths stay readable.
 
 **Bedrock quotas (cross-region):**
 - Sonnet 4.6 quotas: 10,000 RPM, 6,000,000 TPM (account-level, cross-region).

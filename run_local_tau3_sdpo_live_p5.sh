@@ -49,7 +49,26 @@ if [ ! -f "$TASK_DIR/train.parquet" ] || [ ! -f "$TASK_DIR/test.parquet" ]; then
 fi
 
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
-MODEL_NAME=$(echo "$MODEL_PATH" | tr '/:' '--')
+
+compact_model_name() {
+    local model_path="$1"
+    local alias="${MODEL_ALIAS:-${MODEL_NAME:-}}"
+    if [ -n "$alias" ]; then
+        echo "$alias"
+        return
+    fi
+
+    local step
+    step=$(echo "$model_path" | grep -oE 'global_step_[0-9]+' | tail -1 || true)
+    if [ -n "$step" ]; then
+        echo "ckpt-${step#global_step_}"
+        return
+    fi
+
+    echo "$model_path" | tr '/:' '--'
+}
+
+MODEL_NAME=$(compact_model_name "$MODEL_PATH" | tr -cs '[:alnum:]_.-' '-' | sed -E 's/^-+|-+$//g; s/-{2,}/-/g')
 SDPO_ARM="${SDPO_ARM:-vanilla_peer}"
 case "$SDPO_ARM" in
     vanilla|vanilla_peer|peer|successful_peer) SDPO_ARM="vanilla_peer" ;;
@@ -131,6 +150,7 @@ echo "Starting latest-VERL tau3 vanilla SDPO baseline"
 echo "Experiment: $EXP_NAME"
 echo "SDPO arm: $SDPO_ARM"
 echo "Model: $MODEL_PATH"
+echo "Model alias: $MODEL_NAME"
 echo "Task dir: $TASK_DIR"
 echo "Thinking: ${ENABLE_THINKING:-true}"
 echo "Rollout n: ${ROLLOUT_BATCH_SIZE:-8}"
