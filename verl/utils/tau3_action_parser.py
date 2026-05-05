@@ -106,6 +106,14 @@ def looks_like_functional_tool_call(text: str) -> bool:
 
 
 def _parse_parameter_value(raw_value: str) -> Any:
+    """Parse one Qwen XML ``<parameter=...>`` value.
+
+    Qwen XML uses JSON syntax inside each parameter block: strings are quoted,
+    arrays/objects are JSON, and scalar numbers/bools/null are unquoted. Keep
+    malformed/unquoted non-JSON text as text, but preserve valid JSON scalar
+    types so integer tool args such as baggage counts do not become strings.
+    """
+
     value = (raw_value or "").strip()
     if not value:
         return ""
@@ -117,10 +125,7 @@ def _parse_parameter_value(raw_value: str) -> Any:
         return _coerce_json_like_argument_value(decoded)
     if isinstance(decoded, str):
         return decoded
-    # Preserve scalar numeric/bool/null values as strings unless they were
-    # explicitly quoted by the model. This avoids passing ints/bools into tool
-    # parameters that are schema-typed as strings (for example retail zip codes).
-    return value
+    return decoded
 
 
 def extract_qwen_tool_call(text: str) -> dict[str, Any] | None:

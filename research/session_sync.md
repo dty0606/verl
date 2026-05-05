@@ -365,6 +365,16 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - `teacher_prompt_saturation_fraction=0.0` at `SDPO_MAX_REPROMPT_LEN=12288` — no truncation.
 - Vanilla peer SDPO is success-gated: if no rollout in a prompt group succeeds, that group contributes zero SDPO signal. On harder random train tasks, many steps may have zero signal.
 
+**GRPO r16k step-300 canonical test20 eval audit:**
+- Artifact `research/diagnostics/eval_grpo_r16k_step300_test20.zip` reported `pass^1=0.342`, `pass^2=0.333`, `pass^3=0.325`, `pass^4=0.317` over 240 rollouts (3 seeds x 4 trials x 20 test tasks). Codex recomputed the pass^K math from raw `rollouts.jsonl` and matched `results.json` exactly.
+- The numeric result is valid for that evaluator run, but interpretation is not yet paper-clean because some failures are evaluation artifacts:
+  - 55/240 rollouts hit `VLLMValidationError` from context length (`prompt contains at least 32769 input tokens` with `max_model_len=32768`), concentrated in hard tasks such as task 35 (12/12 context failures), task 8 (10/12), and task 24 (10/12).
+  - 31 trajectory JSONs show Tau2 `unsupported operand type` tool errors caused by Qwen XML numeric parameters being parsed as strings, e.g. `<parameter=total_baggages>0</parameter>` became `"total_baggages": "0"`.
+- Fixed current repo parser in `verl/utils/tau3_action_parser.py`: Qwen XML parameter values now preserve JSON scalar types (`0` -> int, quoted `"12345"` -> str). Added `tests/utils/test_tau3_action_parser.py`.
+- Added `scripts/tau3/audit_tau3_eval_artifact.py` to separate context-length failures, unsupported operand tool errors, numeric-string tool args, and clean policy failures in future eval artifacts.
+- Updated `scripts/tau3/eval_tau3_paired.sh` to put the active checkout first in `PYTHONPATH`, because the historical Python evaluator may live outside this repo. Kiro should still port/copy the working evaluator into `scripts/tau3/eval_tau3_base_models.py` or explicitly verify it imports this repo's parser before rerunning final numbers.
+- Current interpretation: GRPO step 300 clearly improves over SFT and learns consistent simple/policy-boundary behavior, but the exact `34.2%` pass^1 may be a conservative lower bound. Re-run canonical test20 after parser fix before claiming GRPO maximum capacity or deciding whether to extend training.
+
 ## Evidence Carried Forward
 
 From the old repo:

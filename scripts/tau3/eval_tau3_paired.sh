@@ -51,6 +51,10 @@ mkdir -p "$OUTPUT_ROOT" "$LOG_DIR"
 
 # --- vLLM flags ---
 export VLLM_LANGUAGE_MODEL_ONLY="${VLLM_LANGUAGE_MODEL_ONLY:-true}"
+# The historical eval entrypoint can live outside this checkout. Put the active
+# repo first so it imports the current Tau3 parser/diagnostics instead of stale
+# installed or sibling-repo modules.
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
 # --- Task split across GPUs ---
 # Split TEST_TASK_IDS evenly and contiguously across available GPUs. This keeps
