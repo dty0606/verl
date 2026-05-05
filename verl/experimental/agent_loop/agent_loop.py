@@ -854,6 +854,12 @@ class AgentLoopWorker:
             "min_global_steps",
             "max_global_steps",
             "extras",
+            # Tau3 tool fields may appear only after a live tool call. Keep
+            # them present for every worker chunk so DataProto.concat can
+            # concatenate chunks where some samples never reached a tool call.
+            "tau3_live_result",
+            "tau3_should_terminate",
+            "tau3_runtime",
         }
         all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
         for key in all_keys:
