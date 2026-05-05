@@ -56,6 +56,14 @@ export VLLM_LANGUAGE_MODEL_ONLY="${VLLM_LANGUAGE_MODEL_ONLY:-true}"
 # installed or sibling-repo modules.
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
+# --- Clear stale bytecode caches to prevent import of old .pyc ---
+find "$(pwd)/verl" -name "*.pyc" -delete 2>/dev/null || true
+find "$(pwd)/verl" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+if [ -d "$HOME/SDPO-qwen35/verl" ]; then
+    find "$HOME/SDPO-qwen35/verl" -name "*.pyc" -delete 2>/dev/null || true
+    find "$HOME/SDPO-qwen35/verl" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+fi
+
 # --- Task split across GPUs ---
 # Split TEST_TASK_IDS evenly and contiguously across available GPUs. This keeps
 # the recorded eval grid and the actual launched task grid identical.
