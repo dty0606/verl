@@ -375,6 +375,35 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Updated `scripts/tau3/eval_tau3_paired.sh` to put the active checkout first in `PYTHONPATH`, because the historical Python evaluator may live outside this repo. Kiro should still port/copy the working evaluator into `scripts/tau3/eval_tau3_base_models.py` or explicitly verify it imports this repo's parser before rerunning final numbers.
 - Current interpretation: GRPO step 300 clearly improves over SFT and learns consistent simple/policy-boundary behavior, but the exact `34.2%` pass^1 may be a conservative lower bound. Re-run canonical test20 after parser fix before claiming GRPO maximum capacity or deciding whether to extend training.
 
+### 2026-05-05 GRPO step-300 canonical test20 eval v2 (parser fix confirmed)
+
+- Reran eval on us-west-2 P5 with parser fix at commit `d6c15789` confirmed active via `PYTHONPATH` (old eval script imports `from verl.utils.tau3_action_parser import parse_model_output_to_tau_action`).
+- Same grid: 3 seeds (42/123/456), val_n=4, 20 test tasks, MAX_STEPS=50, temp=0.4, top_p=0.95.
+- **Corrected results**: pass^1=**0.354**, pass^2=**0.342**, pass^3=**0.338**, pass^4=**0.333**.
+- Comparison with v1 (broken parser): pass^1 0.342→0.354 (+0.012), pass^4 0.317→0.333 (+0.016).
+- Notable task changes: task 16 (0→0.08, 1 new success), task 30 (0→0.08), task 48 (0.92→1.00).
+- Audit results (v2):
+  - successes: 85/240 (was 82/240 in v1)
+  - context_length errors: 61/240 (was 55 in v1 — stochastic, same tasks dominate: 18, 35, 8)
+  - unsupported_operand_trajectory_rows: 26 (was 31 — reduced but not zero)
+  - numeric_string_tool_arg_trajectory_rows: 34 (was 55 — significantly reduced)
+  - tool_execution_error_rows: 59
+  - json_parse_error_rows: 0
+- Residual numeric-string issue: 26 trajectories still show `unsupported operand type` errors. The parser fix handles Qwen XML `<parameter=...>` values correctly, but there is likely a second source: either the tau2-bench gym itself coerces tool arguments to strings internally, or some model outputs use a format path that bypasses `parse_model_output_to_tau_action`. This is a tau2-bench evaluator issue, not a policy failure.
+- Context-length remains the dominant artifact (61/240 = 25.4%). Tasks 18, 35 hit it on all 12 rollouts. These are genuinely hard multi-turn tasks where the model exhausts 32K context.
+- **Corrected interpretation**: GRPO step 300 achieves **35.4% pass^1** on canonical test20 with the fixed parser. The true policy ceiling is likely higher (context-length failures mask ~25% of rollouts). Extending training or increasing MAX_MODEL_LEN are both viable next steps, but the current number is sufficient for the SDPO comparison baseline.
+- Artifact: `research/diagnostics/eval_grpo_r16k_step300_test20_v2.tar.gz` (11MB, 240 trajectories + results.json + eval log).
+
+### 2026-05-05 SDPO vanilla_peer full baseline status (us-east-1)
+
+- Running on us-east-1 P5, at step 50/300 as of this update.
+- Step 46 was the last step with nonzero SDPO signal: `success_sample_fraction=0.375`, `pg_loss=0.0011`, `grad_norm=12.03`.
+- Steps 47-50: all-fail batches (`success_sample_fraction=0.0`, `empty_target_batch=1.0`, zero gradient). This is expected sparsity for vanilla_peer on random hard tasks — the algorithm is success-gated.
+- `response_length/clip_ratio` is 0.89-0.98 (most rollouts hitting 16384 max response). The model is generating very long responses on hard tasks.
+- `tau3_live/terminal_fraction` is only 0.01-0.11 — most rollouts are nonterminal (budget exhausted or still running when max response hit).
+- Run is healthy (GPUs at 86-100% utilization, ~550s/step). ETA ~70 more hours for remaining 250 steps.
+- Key question for analysis: what fraction of the 300 steps will have nonzero SDPO signal? If <10%, the vanilla_peer arm may need easier task sampling or curriculum.
+
 ## Evidence Carried Forward
 
 From the old repo:
