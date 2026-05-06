@@ -91,6 +91,10 @@ SageMaker Code Editor may be container-based and unable to run Docker. In that
 case, use the isolated conda env path first, then run the same ordered vLLM V1
 capacity ladder without Docker.
 
+See `research/p5_vllm_v1_conda_runbook.md` for the complete no-Docker P5
+sequence, including S3 snapshot sync, `tau2-bench`, preflight gates, capacity
+smoke criteria, and frozen-env export.
+
 ```bash
 cd ~/verl_tau3_sdpo
 

@@ -591,6 +591,17 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - rollout dump enrichment.
   - Defer length-clipped sample masking until diagnostics confirm it is needed, because it changes the optimization objective.
 
+### 2026-05-06 vLLM V1 no-Docker conda runbook branch
+
+- Created branch `codex/vllm-v1-env-bringup` for the P5 no-Docker environment handoff.
+- Added `research/p5_vllm_v1_conda_runbook.md` as the one-page execution path for SageMaker Code Editor P5:
+  - S3 snapshot flow for P5 hosts without Git.
+  - `sdpo-vllm20-v1` conda env build from `scripts/p5_setup_vllm_v1_env.sh`.
+  - Required `tau2-bench` snapshot/install at commit `220b47844fb74d4351037e81055cf1e2948e4734`.
+  - Preflight, GRPO capacity smoke, original-SDPO smoke, hybrid-KV bounded fallbacks, frozen-env export, and stop conditions.
+- Hardened `scripts/p5_setup_vllm_v1_env.sh` so the conda path now installs Tau3 live runtime deps and installs `tau2-bench` from an existing S3-synced directory or Git when available.
+- Important gating rule for Kiro/P5: `scripts/p5_preflight_vllm_v1.py` is necessary but not sufficient. A 2-3 step GRPO capacity smoke is the first true proof that the vLLM V1 engine works for Qwen3.5 on P5.
+
 ## Evidence Carried Forward
 
 From the old repo:

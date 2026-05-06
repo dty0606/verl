@@ -11,6 +11,9 @@ ENV_NAME="${ENV_NAME:-sdpo-vllm20-v1}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VLLM_VERSION="${VLLM_VERSION:-0.20.1}"
 TORCH_BACKEND="${TORCH_BACKEND:-cu129}"
+TAU2_REPO="${TAU2_REPO:-https://github.com/sierra-research/tau2-bench.git}"
+TAU2_COMMIT="${TAU2_COMMIT:-220b47844fb74d4351037e81055cf1e2948e4734}"
+TAU2_DIR="${TAU2_DIR:-$HOME/tau2-bench}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "----------------------------------------------------------------"
@@ -20,6 +23,7 @@ echo "Conda env: $ENV_NAME"
 echo "Python: $PYTHON_VERSION"
 echo "vLLM: $VLLM_VERSION"
 echo "torch backend: $TORCH_BACKEND"
+echo "tau2-bench: $TAU2_DIR @ $TAU2_COMMIT"
 echo "----------------------------------------------------------------"
 
 if ! command -v conda >/dev/null 2>&1; then
@@ -46,7 +50,57 @@ else
 fi
 
 cd "$PROJECT_ROOT"
-python -m pip install -e .
+
+# Install VERL/Tau3 runtime dependencies without letting the local editable
+# package resolver drift the torch/vLLM ABI pair that vLLM just installed.
+python -m pip install \
+    accelerate \
+    addict \
+    boto3 \
+    codetiming \
+    datasets \
+    deepdiff \
+    dill \
+    fastuuid \
+    "gymnasium>=1.2.2" \
+    hydra-core \
+    latex2sympy2_extended \
+    "litellm>=1.80.15,<1.82.7" \
+    mathruler \
+    multiprocess \
+    "numpy<2.0.0" \
+    pandas \
+    peft \
+    "pyarrow>=19.0.0" \
+    pybind11 \
+    pylatexenc \
+    qwen-vl-utils \
+    "ray[default]>=2.41.0" \
+    tenacity \
+    tensorboard \
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0" \
+    toml \
+    torchdata \
+    wandb \
+    xxhash
+
+python -m pip install -e . --no-deps
+
+if [ -d "$TAU2_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+    git -C "$TAU2_DIR" fetch --quiet origin "$TAU2_COMMIT" || true
+    git -C "$TAU2_DIR" checkout --detach "$TAU2_COMMIT"
+elif [ -f "$TAU2_DIR/pyproject.toml" ] || [ -f "$TAU2_DIR/setup.py" ]; then
+    echo "Using existing tau2-bench directory without git metadata: $TAU2_DIR"
+elif [ ! -e "$TAU2_DIR" ] && command -v git >/dev/null 2>&1; then
+    git clone "$TAU2_REPO" "$TAU2_DIR"
+    git -C "$TAU2_DIR" checkout --detach "$TAU2_COMMIT"
+else
+    echo "Error: tau2-bench is required but $TAU2_DIR is not an installable snapshot." >&2
+    echo "Sync a tau2-bench snapshot to $TAU2_DIR from S3, or set TAU2_DIR to an existing copy." >&2
+    exit 1
+fi
+python -m pip install -e "$TAU2_DIR" --no-deps
+export TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_DIR/data}"
 
 python - <<'PY'
 import os
@@ -63,4 +117,5 @@ PY
 echo "Setup complete. Before launching training, run:"
 echo "  conda activate $ENV_NAME"
 echo "  export VLLM_USE_V1=1"
+echo "  export TAU2_DATA_DIR=${TAU2_DATA_DIR:-$TAU2_DIR/data}"
 echo "  python scripts/p5_preflight_vllm_v1.py --model-path <model> --dataset-dir <dataset>"
