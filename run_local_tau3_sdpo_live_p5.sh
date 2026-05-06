@@ -82,6 +82,31 @@ EXP_NAME="LOCAL-TAU3-SDPO-${SDPO_ARM}-${FEEDBACK_MODE}-${MODEL_NAME}-${SUFFIX}"
 mkdir -p "$SDPO_OUTPUT_ROOT" "$SDPO_CHECKPOINT_ROOT" logs
 rm -f /dev/shm/verl_dist_store_* 2>/dev/null || true
 
+TAU3_VLLM_PROFILE="${TAU3_VLLM_PROFILE:-qwen35_v1}"
+case "$TAU3_VLLM_PROFILE" in
+    qwen35_v1|vllm_v1|v1)
+        export VLLM_USE_V1="${VLLM_USE_V1:-1}"
+        export VLLM_ALLREDUCE_USE_SYMM_MEM="${VLLM_ALLREDUCE_USE_SYMM_MEM:-0}"
+        VLLM_ENABLE_PREFIX_CACHING="${VLLM_ENABLE_PREFIX_CACHING:-false}"
+        VLLM_ENABLE_CHUNKED_PREFILL="${VLLM_ENABLE_CHUNKED_PREFILL:-true}"
+        VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}"
+        VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-false}"
+        ;;
+    legacy|off|none)
+        if [ -n "${VLLM_USE_V1:-}" ]; then
+            export VLLM_USE_V1
+        fi
+        VLLM_ENABLE_PREFIX_CACHING="${VLLM_ENABLE_PREFIX_CACHING:-}"
+        VLLM_ENABLE_CHUNKED_PREFILL="${VLLM_ENABLE_CHUNKED_PREFILL:-}"
+        VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-}"
+        VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-}"
+        ;;
+    *)
+        echo "Error: TAU3_VLLM_PROFILE must be qwen35_v1 or legacy"
+        exit 1
+        ;;
+esac
+
 ARGS=(
     --config-name=tau3_sdpo_live
     "data.train_files=$TASK_DIR/train.parquet"
@@ -89,7 +114,7 @@ ARGS=(
     "data.train_batch_size=${TRAIN_BATCH_SIZE:-8}"
     "data.val_batch_size=${VAL_BATCH_SIZE:-${TRAIN_BATCH_SIZE:-8}}"
     "data.max_prompt_length=${MAX_PROMPT_LENGTH:-16384}"
-    "data.max_response_length=${MAX_RESPONSE_LENGTH:-12288}"
+    "data.max_response_length=${MAX_RESPONSE_LENGTH:-16384}"
     "+data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING:-true}"
     "max_model_len=${MAX_MODEL_LEN:-32768}"
     "actor_rollout_ref.model.path=$MODEL_PATH"
@@ -110,7 +135,7 @@ ARGS=(
     "actor_rollout_ref.rollout.val_kwargs.top_p=${VAL_TOP_P:-0.95}"
     "actor_rollout_ref.rollout.val_kwargs.n=${VAL_N:-4}"
     "algorithm.adv_estimator=grpo"
-    "tau3.sdpo.max_reprompt_len=${SDPO_MAX_REPROMPT_LEN:-12288}"
+    "tau3.sdpo.max_reprompt_len=${SDPO_MAX_REPROMPT_LEN:-16384}"
     "tau3.sdpo.reprompt_truncation=${SDPO_REPROMPT_TRUNCATION:-right}"
     "trainer.project_name=${PROJECT_NAME:-SDPO-${USER}}"
     "trainer.experiment_name=$EXP_NAME"
@@ -156,8 +181,41 @@ fi
 if [ -n "${ROLLOUT_DATA_DIR:-}" ]; then
     ARGS+=("trainer.rollout_data_dir=$ROLLOUT_DATA_DIR")
 fi
+if [ -n "${VLLM_ENABLE_PREFIX_CACHING:-}" ]; then
+    ARGS+=("actor_rollout_ref.rollout.enable_prefix_caching=$VLLM_ENABLE_PREFIX_CACHING")
+fi
+if [ -n "${VLLM_ENABLE_CHUNKED_PREFILL:-}" ]; then
+    ARGS+=("actor_rollout_ref.rollout.enable_chunked_prefill=$VLLM_ENABLE_CHUNKED_PREFILL")
+fi
+if [ -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" ]; then
+    ARGS+=("actor_rollout_ref.rollout.max_num_batched_tokens=$VLLM_MAX_NUM_BATCHED_TOKENS")
+fi
+if [ -n "${VLLM_ENFORCE_EAGER:-}" ]; then
+    ARGS+=("actor_rollout_ref.rollout.enforce_eager=$VLLM_ENFORCE_EAGER")
+fi
 if [ -n "${VLLM_LANGUAGE_MODEL_ONLY:-}" ]; then
     ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only=$VLLM_LANGUAGE_MODEL_ONLY")
+fi
+if [ -n "${VLLM_COMPILATION_CONFIG_JSON:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config=$VLLM_COMPILATION_CONFIG_JSON")
+fi
+if [ -n "${VLLM_BLOCK_SIZE:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.block_size=$VLLM_BLOCK_SIZE")
+fi
+if [ -n "${VLLM_MAMBA_BLOCK_SIZE:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_block_size=$VLLM_MAMBA_BLOCK_SIZE")
+fi
+if [ -n "${VLLM_MAMBA_CACHE_MODE:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode=$VLLM_MAMBA_CACHE_MODE")
+fi
+if [ -n "${VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_hybrid_kv_cache_manager=$VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER")
+fi
+if [ -n "${VLLM_KV_CACHE_MEMORY_BYTES:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_memory_bytes=$VLLM_KV_CACHE_MEMORY_BYTES")
+fi
+if [ -n "${VLLM_DISABLE_CASCADE_ATTN:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_cascade_attn=$VLLM_DISABLE_CASCADE_ATTN")
 fi
 
 echo "----------------------------------------------------------------"
@@ -169,8 +227,12 @@ echo "Model alias: $MODEL_NAME"
 echo "Task dir: $TASK_DIR"
 echo "Thinking: ${ENABLE_THINKING:-true}"
 echo "Rollout n: ${ROLLOUT_BATCH_SIZE:-8}"
-echo "SDPO max reprompt len: ${SDPO_MAX_REPROMPT_LEN:-12288}"
+echo "Max response length: ${MAX_RESPONSE_LENGTH:-16384}"
+echo "SDPO max reprompt len: ${SDPO_MAX_REPROMPT_LEN:-16384}"
 echo "SDPO reprompt truncation: ${SDPO_REPROMPT_TRUNCATION:-right}"
+echo "vLLM profile: $TAU3_VLLM_PROFILE"
+echo "VLLM_USE_V1: ${VLLM_USE_V1:-<unset>}"
+echo "vLLM prefix/chunked/max-batched/eager: ${VLLM_ENABLE_PREFIX_CACHING:-<config>}/${VLLM_ENABLE_CHUNKED_PREFILL:-<config>}/${VLLM_MAX_NUM_BATCHED_TOKENS:-<config>}/${VLLM_ENFORCE_EAGER:-<config>}"
 echo "----------------------------------------------------------------"
 
 python3 -m verl.trainer.main_ppo "${ARGS[@]}" "${@:4}"

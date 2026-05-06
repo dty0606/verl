@@ -491,6 +491,35 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - `empty_target_batch` should not persist once failures have feedback, even if `success_sample_fraction=0`.
   - Stop or inspect if `response_length/clip_ratio` stays near 1.0 with `tau3_live/terminal_fraction` collapsing, or if `reprompt_sample_fraction=0` for several consecutive steps.
 
+### 2026-05-06 latest-VERL vLLM V1 / vLLM20 migration path
+
+- Decision: move the Tau3 execution path forward in the latest-VERL fork instead of spending more time repairing the old paper-original SDPO conda environment.
+- Added a reversible Tau3 vLLM profile in both GRPO and SDPO launchers:
+  - Default `TAU3_VLLM_PROFILE=qwen35_v1`.
+  - Exports `VLLM_USE_V1=1` and `VLLM_ALLREDUCE_USE_SYMM_MEM=0`.
+  - Sets Qwen3.5-safe rollout defaults from the repo's own Qwen3.5 FSDP examples: `enable_prefix_caching=false`, `enable_chunked_prefill=true`, `max_num_batched_tokens=8192`, `enforce_eager=false`.
+  - `TAU3_VLLM_PROFILE=legacy` preserves the old passthrough behavior if the P5 image needs rollback.
+- Updated Tau3 launch defaults back to the r16k comparison setup:
+  - `data.max_response_length=16384` by default for GRPO and SDPO.
+  - `tau3.sdpo.max_reprompt_len=16384` by default for the SDPO launcher.
+- Added vLLM V1-specific runtime overrides for Kiro/P5 debugging without code edits:
+  - `VLLM_BLOCK_SIZE`
+  - `VLLM_MAMBA_BLOCK_SIZE`
+  - `VLLM_MAMBA_CACHE_MODE`
+  - `VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER`
+  - `VLLM_KV_CACHE_MEMORY_BYTES`
+  - `VLLM_DISABLE_CASCADE_ATTN`
+  - `VLLM_COMPILATION_CONFIG_JSON`
+- Added `scripts/p5_preflight_vllm_v1.py` to fail before training if:
+  - `VLLM_USE_V1` is not active.
+  - vLLM is older than `0.20.0` unless explicitly allowed.
+  - `vllm._C` cannot import, which catches the torch/vLLM ABI mismatch seen on east P5.
+  - `cuda_runtime.h` is missing, which catches the FlashInfer/GDN JIT failure seen on east P5.
+  - Tau3 parser no longer preserves numeric XML parameters as ints.
+- Added `scripts/p5_setup_vllm_v1_env.sh` as a best-effort conda setup helper using `uv pip install vllm==$VLLM_VERSION --torch-backend $TORCH_BACKEND`. Prefer the official image when available; this script is for temporary P5 bring-up.
+- Remaining risk:
+  - vLLM V1 hybrid KV support is exactly the moving part for Qwen3.5/GDN. The first P5 smoke must be 2-3 steps only, and if the page-size error persists, try `VLLM_BLOCK_SIZE`/`VLLM_MAMBA_BLOCK_SIZE` and `VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER` before full overnight training.
+
 ## Evidence Carried Forward
 
 From the old repo:
