@@ -465,6 +465,32 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - A Python parser sanity check returns int types for Qwen XML numeric parameters.
 - Suggested stop conditions: resume load fails; first step prints "Training from scratch"; checkpoint save does not create `actor/huggingface/model*.safetensors` or equivalent HF weights after the first save; reward/terminal metrics collapse like the failed SDPO run.
 
+### 2026-05-05 SDPO original-style hybrid arm restored
+
+- Rechecked the upstream SDPO paper/code defaults before the next Tau3 run:
+  - Paper/repo framing: SDPO uses feedback-conditioned self-teacher predictions and can also use successful high-reward rollouts as implicit feedback when rich feedback is unavailable.
+  - Upstream `actor.self_distillation` defaults include `include_environment_feedback=True`, `environment_feedback_only_without_solution=True`, `dont_reprompt_on_self_success=True`, `remove_thinking_from_demonstration=True`, `distillation_topk=100`, `alpha=0.5`, `is_clip=2`, `max_reprompt_len=10240`, and `reprompt_truncation=right`.
+  - Upstream `run_local_sdpo.sh` sets `rollout.n=8`, `policy_loss.loss_mode=sdpo`, `dont_reprompt_on_self_success=True`, and `alpha=0.5`; rich-feedback experiments use the feedback-enabled default path.
+- Corrected this latest-VERL Tau3 launcher/config so `SDPO_ARM=original` is now the default. `SDPO_ARM=vanilla` is accepted as an alias for this original-style hybrid arm. It means:
+  - `include_environment_feedback=true`
+  - `use_successful_peer_solution=true`
+  - `only_failed_with_feedback=true`
+  - `dont_reprompt_on_self_success=true`
+  - `environment_feedback_only_without_solution=true`
+  - `serialize_nonstring_feedback=true`
+  - `reprompt_truncation=right`
+- Interpretation update:
+  - `SDPO_ARM=vanilla_peer` is now explicitly a diagnostic peer-only arm, not the main roadmap baseline and not the memory-SDPO proposal. It is success-gated and can produce empty-target batches on all-fail rollout groups.
+  - `SDPO_ARM=feedback_only` remains a diagnostic ablation.
+  - The overnight baseline should use `SDPO_ARM=original` and a short suffix such as `sdpo_original_full`.
+- Fidelity caveat:
+  - This is original-style SDPO teacher-context routing in the latest-VERL Tau3 port, not a byte-for-byte upstream SDPO reproduction.
+  - Current local loss remains sampled-token reverse-KL using stored `teacher_logprobs` (`SDPO_ALPHA=1.0` required by the port). It does not yet implement upstream full-logit/top-k/JSD/EMA teacher regularization. If the paper needs literal upstream SDPO, port those pieces as a separate fidelity task.
+- Overnight health gates:
+  - Expect `self_distillation/feedback_available_fraction > 0` and `feedback_used_fraction > 0` on failed samples.
+  - `empty_target_batch` should not persist once failures have feedback, even if `success_sample_fraction=0`.
+  - Stop or inspect if `response_length/clip_ratio` stays near 1.0 with `tau3_live/terminal_fraction` collapsing, or if `reprompt_sample_fraction=0` for several consecutive steps.
+
 ## Evidence Carried Forward
 
 From the old repo:

@@ -101,19 +101,21 @@ tau3:
   selected_task_ids: ${oc.env:TAU3_LIVE_TASK_IDS,}
   sdpo:
     enabled: True
-    # Default to the old repo's "vanilla" SDPO arm: successful peer
-    # demonstrations as teacher context, not Tau3 feedback-only reprompting.
+    # Default to the SDPO paper/code teacher-context routing: successful peer
+    # demonstration when available, otherwise environment feedback for failed
+    # samples. Peer-only and feedback-only arms remain launcher-controlled
+    # diagnostics, not the main Tau3 SDPO baseline.
     max_reprompt_len: 12288
-    reprompt_truncation: error
+    reprompt_truncation: right
     success_reward_threshold: 1.0
     failure_reward_threshold: 1.0
-    include_environment_feedback: False
+    include_environment_feedback: True
     use_successful_peer_solution: True
-    only_failed_with_feedback: False
-    dont_reprompt_on_self_success: False
-    environment_feedback_only_without_solution: False
+    only_failed_with_feedback: True
+    dont_reprompt_on_self_success: True
+    environment_feedback_only_without_solution: True
     remove_thinking_from_demonstration: True
-    serialize_nonstring_feedback: False
+    serialize_nonstring_feedback: True
     reprompt_template: |-
       {prompt}{solution}{feedback}
 

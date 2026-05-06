@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Vanilla SDPO baseline for tau3 live on latest VERL.
+# SDPO baseline for tau3 live on latest VERL.
 #
 # SDPO_ARM controls the teacher-context variant:
-#   vanilla_peer  -> successful-peer teacher demonstrations, no env feedback
-#   feedback_only -> failed-sample environment feedback, no peer solution
+#   original      -> paper-style hybrid: successful peer if available,
+#                    otherwise failed-sample environment feedback
+#   vanilla_peer  -> diagnostic successful-peer-only teacher, no env feedback
+#   feedback_only -> diagnostic failed-sample feedback-only teacher, no peer solution
 #
 # Usage:
 #   ./run_local_tau3_sdpo_live_p5.sh <task_path> [experiment_name_suffix] [feedback_mode]
@@ -69,11 +71,12 @@ compact_model_name() {
 }
 
 MODEL_NAME=$(compact_model_name "$MODEL_PATH" | tr -cs '[:alnum:]_.-' '-' | sed -E 's/^-+|-+$//g; s/-{2,}/-/g')
-SDPO_ARM="${SDPO_ARM:-vanilla_peer}"
+SDPO_ARM="${SDPO_ARM:-original}"
 case "$SDPO_ARM" in
-    vanilla|vanilla_peer|peer|successful_peer) SDPO_ARM="vanilla_peer" ;;
+    original|paper|paper_hybrid|hybrid|vanilla|vanilla_sdpo) SDPO_ARM="original" ;;
+    vanilla_peer|peer|successful_peer) SDPO_ARM="vanilla_peer" ;;
     feedback|feedback_only|ff_sdpo) SDPO_ARM="feedback_only" ;;
-    *) echo "Error: SDPO_ARM must be vanilla_peer or feedback_only"; exit 1 ;;
+    *) echo "Error: SDPO_ARM must be original, vanilla_peer, or feedback_only"; exit 1 ;;
 esac
 EXP_NAME="LOCAL-TAU3-SDPO-${SDPO_ARM}-${FEEDBACK_MODE}-${MODEL_NAME}-${SUFFIX}"
 mkdir -p "$SDPO_OUTPUT_ROOT" "$SDPO_CHECKPOINT_ROOT" logs
@@ -108,7 +111,7 @@ ARGS=(
     "actor_rollout_ref.rollout.val_kwargs.n=${VAL_N:-4}"
     "algorithm.adv_estimator=grpo"
     "tau3.sdpo.max_reprompt_len=${SDPO_MAX_REPROMPT_LEN:-12288}"
-    "tau3.sdpo.reprompt_truncation=${SDPO_REPROMPT_TRUNCATION:-error}"
+    "tau3.sdpo.reprompt_truncation=${SDPO_REPROMPT_TRUNCATION:-right}"
     "trainer.project_name=${PROJECT_NAME:-SDPO-${USER}}"
     "trainer.experiment_name=$EXP_NAME"
     "trainer.total_epochs=${TOTAL_EPOCHS:-300}"
@@ -119,9 +122,21 @@ ARGS=(
     "trainer.nnodes=${NNODES:-1}"
 )
 
-if [ "$SDPO_ARM" = "vanilla_peer" ]; then
-    # Match the old repo's SDPO_ARM=vanilla intent: successful peer solution
-    # demonstrations are the teacher context; environment feedback is disabled.
+if [ "$SDPO_ARM" = "original" ]; then
+    # Match the SDPO paper/code default teacher-context routing: use a successful
+    # peer demonstration when one exists, otherwise fall back to rich environment
+    # feedback for failed samples. This avoids the zero-target failure mode of
+    # the peer-only diagnostic arm on all-fail rollout groups.
+    ARGS+=("tau3.sdpo.include_environment_feedback=true")
+    ARGS+=("tau3.sdpo.use_successful_peer_solution=true")
+    ARGS+=("tau3.sdpo.only_failed_with_feedback=true")
+    ARGS+=("tau3.sdpo.dont_reprompt_on_self_success=true")
+    ARGS+=("tau3.sdpo.environment_feedback_only_without_solution=true")
+    ARGS+=("tau3.sdpo.serialize_nonstring_feedback=true")
+elif [ "$SDPO_ARM" = "vanilla_peer" ]; then
+    # Diagnostic peer-only arm: successful peer solution demonstrations are the
+    # teacher context; environment feedback is disabled. This is not the main
+    # paper-style baseline for Tau3.
     ARGS+=("tau3.sdpo.include_environment_feedback=false")
     ARGS+=("tau3.sdpo.use_successful_peer_solution=true")
     ARGS+=("tau3.sdpo.only_failed_with_feedback=false")
@@ -129,7 +144,7 @@ if [ "$SDPO_ARM" = "vanilla_peer" ]; then
     ARGS+=("tau3.sdpo.environment_feedback_only_without_solution=false")
     ARGS+=("tau3.sdpo.serialize_nonstring_feedback=false")
 else
-    # Preserve the feedback-only Tau3 SDPO variant for ablation/debugging.
+    # Diagnostic feedback-only Tau3 SDPO variant for ablation/debugging.
     ARGS+=("tau3.sdpo.include_environment_feedback=true")
     ARGS+=("tau3.sdpo.use_successful_peer_solution=false")
     ARGS+=("tau3.sdpo.only_failed_with_feedback=true")
@@ -146,7 +161,7 @@ if [ -n "${VLLM_LANGUAGE_MODEL_ONLY:-}" ]; then
 fi
 
 echo "----------------------------------------------------------------"
-echo "Starting latest-VERL tau3 vanilla SDPO baseline"
+echo "Starting latest-VERL tau3 SDPO baseline"
 echo "Experiment: $EXP_NAME"
 echo "SDPO arm: $SDPO_ARM"
 echo "Model: $MODEL_PATH"
@@ -155,7 +170,7 @@ echo "Task dir: $TASK_DIR"
 echo "Thinking: ${ENABLE_THINKING:-true}"
 echo "Rollout n: ${ROLLOUT_BATCH_SIZE:-8}"
 echo "SDPO max reprompt len: ${SDPO_MAX_REPROMPT_LEN:-12288}"
-echo "SDPO reprompt truncation: ${SDPO_REPROMPT_TRUNCATION:-error}"
+echo "SDPO reprompt truncation: ${SDPO_REPROMPT_TRUNCATION:-right}"
 echo "----------------------------------------------------------------"
 
 python3 -m verl.trainer.main_ppo "${ARGS[@]}" "${@:4}"
