@@ -91,15 +91,12 @@ case "$TAU3_VLLM_PROFILE" in
         VLLM_ENABLE_CHUNKED_PREFILL="${VLLM_ENABLE_CHUNKED_PREFILL:-true}"
         VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}"
         VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-false}"
+        VLLM_LANGUAGE_MODEL_ONLY="${VLLM_LANGUAGE_MODEL_ONLY:-true}"
         ;;
     legacy|off|none)
-        if [ -n "${VLLM_USE_V1:-}" ]; then
-            export VLLM_USE_V1
-        fi
-        VLLM_ENABLE_PREFIX_CACHING="${VLLM_ENABLE_PREFIX_CACHING:-}"
-        VLLM_ENABLE_CHUNKED_PREFILL="${VLLM_ENABLE_CHUNKED_PREFILL:-}"
-        VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-}"
-        VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-}"
+        echo "Error: TAU3_VLLM_PROFILE=legacy is not supported by this vLLM V1 server path."
+        echo "Use the previous known-good env/image for legacy vLLM instead."
+        exit 1
         ;;
     *)
         echo "Error: TAU3_VLLM_PROFILE must be qwen35_v1 or legacy"

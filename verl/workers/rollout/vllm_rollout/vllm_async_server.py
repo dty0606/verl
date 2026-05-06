@@ -919,22 +919,29 @@ class vLLMReplica(RolloutReplica):
                 name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
                 name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
+            server_env_vars = {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                # To prevent hanging or crash during synchronization of weights between actor and rollout
+                # in disaggregated mode. See:
+                # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+                # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+                "NCCL_CUMEM_ENABLE": "0",
+            }
+            for env_key in (
+                "VLLM_USE_V1",
+                "VLLM_ALLREDUCE_USE_SYMM_MEM",
+                "VLLM_LANGUAGE_MODEL_ONLY",
+            ):
+                env_value = os.environ.get(env_key)
+                if env_value is not None:
+                    server_env_vars[env_key] = env_value
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={
-                    "env_vars": {
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                        # To prevent hanging or crash during synchronization of weights between actor and rollout
-                        # in disaggregated mode. See:
-                        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
-                        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
-                        "NCCL_CUMEM_ENABLE": "0",
-                    }
-                },
+                runtime_env={"env_vars": server_env_vars},
                 name=name,
                 max_concurrency=self.max_concurrency,
             ).remote(

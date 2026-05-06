@@ -497,8 +497,9 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Added a reversible Tau3 vLLM profile in both GRPO and SDPO launchers:
   - Default `TAU3_VLLM_PROFILE=qwen35_v1`.
   - Exports `VLLM_USE_V1=1` and `VLLM_ALLREDUCE_USE_SYMM_MEM=0`.
-  - Sets Qwen3.5-safe rollout defaults from the repo's own Qwen3.5 FSDP examples: `enable_prefix_caching=false`, `enable_chunked_prefill=true`, `max_num_batched_tokens=8192`, `enforce_eager=false`.
-  - `TAU3_VLLM_PROFILE=legacy` preserves the old passthrough behavior if the P5 image needs rollback.
+  - Sets Qwen3.5-safe rollout defaults from the repo's own Qwen3.5 FSDP examples: `enable_prefix_caching=false`, `enable_chunked_prefill=true`, `max_num_batched_tokens=8192`, `enforce_eager=false`, `language_model_only=true`.
+  - `TAU3_VLLM_PROFILE=legacy` now fails closed because the current async vLLM server path imports vLLM V1 directly. Roll back with the previous known-good env/image, not this profile.
+  - Explicitly propagates `VLLM_USE_V1`, `VLLM_ALLREDUCE_USE_SYMM_MEM`, and `VLLM_LANGUAGE_MODEL_ONLY` into vLLM Ray server actors.
 - Updated Tau3 launch defaults back to the r16k comparison setup:
   - `data.max_response_length=16384` by default for GRPO and SDPO.
   - `tau3.sdpo.max_reprompt_len=16384` by default for the SDPO launcher.
@@ -519,6 +520,34 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Added `scripts/p5_setup_vllm_v1_env.sh` as a best-effort conda setup helper using `uv pip install vllm==$VLLM_VERSION --torch-backend $TORCH_BACKEND`. Prefer the official image when available; this script is for temporary P5 bring-up.
 - Remaining risk:
   - vLLM V1 hybrid KV support is exactly the moving part for Qwen3.5/GDN. The first P5 smoke must be 2-3 steps only, and if the page-size error persists, try `VLLM_BLOCK_SIZE`/`VLLM_MAMBA_BLOCK_SIZE` and `VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER` before full overnight training.
+
+### 2026-05-06 ECR image package for vLLM V1
+
+- Added a containerized path so future P5 runs do not depend on hand-upgraded conda environments:
+  - `.dockerignore`
+  - `docker/Dockerfile.tau3.vllm20.v1`
+  - `scripts/p5_build_push_ecr_vllm_v1.sh`
+  - `scripts/p5_run_image_smoke_vllm_v1.sh`
+  - `research/vllm_v1_image_plan.md`
+- Image strategy:
+  - Base image: `vllm/vllm-openai:v0.20.0-cu129`.
+  - The "openai" label means OpenAI-compatible HTTP API shape, not OpenAI API usage. We use it for the pinned vLLM/PyTorch/CUDA stack.
+  - Layer latest-VERL Tau3 code and `tau2-bench` commit `220b47844fb74d4351037e81055cf1e2948e4734`.
+  - Keep datasets, checkpoints, W&B, and outputs mounted from the P5 host rather than baked into the image.
+- ECR flow:
+  - Build/push with `AWS_REGION`, `ECR_REPOSITORY`, and `IMAGE_TAG`.
+  - Script creates the ECR repo if missing, logs in, builds, runs baked-image preflight, tags, pushes, and prints final `image_uri` plus digest.
+- Smoke flow:
+  - `SMOKE_MODE=image_preflight` runs the vLLM V1 preflight against the baked image without mounting the host repo.
+  - `SMOKE_MODE=preflight` runs the vLLM V1 preflight against the mounted P5 repo/checkpoint/dataset.
+  - `SMOKE_MODE=grpo` runs a tiny 2-3 step GRPO smoke using the mounted SFT checkpoint and Tau3 dataset.
+  - `SMOKE_MODE=sdpo` is available but should wait until GRPO proves engine startup.
+- Stop before overnight training if any of these appear:
+  - `vllm._C` ABI/import failure.
+  - missing `cuda_runtime.h`.
+  - vLLM V1 hybrid KV page-size initialization failure.
+  - Tau3 parser numeric type regression.
+  - Bedrock credentials/model access failure during live user simulation.
 
 ## Evidence Carried Forward
 
