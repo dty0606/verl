@@ -48,9 +48,15 @@ class TestBuildCliArgsFromConfig:
 
     def test_bool_false(self):
         """Bool False is skipped entirely."""
-        config = {"enable-prefix-caching": False}
+        config = {"disable-log-requests": False}
         result = build_cli_args_from_config(config)
         assert result == []
+
+    def test_explicit_false_boolean_optional_flag(self):
+        """Selected vLLM BooleanOptionalAction flags emit --no-key."""
+        config = {"enable_prefix_caching": False, "max_model_len": 2048}
+        result = build_cli_args_from_config(config)
+        assert result == ["--no-enable-prefix-caching", "--max-model-len", "2048"]
 
     def test_none_value(self):
         """None values are skipped."""

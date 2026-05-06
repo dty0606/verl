@@ -136,6 +136,45 @@ DOCKER_ARGS=(
     -e "SMOKE_MODE=$SMOKE_MODE"
 )
 
+add_optional_env() {
+    local key="$1"
+    if [ "${!key+x}" = "x" ] && [ -n "${!key}" ]; then
+        DOCKER_ARGS+=(-e "$key=${!key}")
+    fi
+}
+
+for key in \
+    VLLM_ENABLE_PREFIX_CACHING \
+    VLLM_ENABLE_CHUNKED_PREFILL \
+    VLLM_MAX_NUM_BATCHED_TOKENS \
+    VLLM_ENFORCE_EAGER \
+    VLLM_COMPILATION_CONFIG_JSON \
+    VLLM_BLOCK_SIZE \
+    VLLM_MAMBA_BLOCK_SIZE \
+    VLLM_MAMBA_CACHE_MODE \
+    VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER \
+    VLLM_KV_CACHE_MEMORY_BYTES \
+    VLLM_DISABLE_CASCADE_ATTN \
+    TRAIN_BATCH_SIZE \
+    VAL_BATCH_SIZE \
+    ROLLOUT_BATCH_SIZE \
+    PPO_MINI_BATCH_SIZE \
+    PPO_MICRO_BATCH_SIZE_PER_GPU \
+    TOTAL_TRAINING_STEPS \
+    TOTAL_EPOCHS \
+    TEST_FREQ \
+    SAVE_FREQ \
+    VAL_N \
+    MAX_PROMPT_LENGTH \
+    MAX_RESPONSE_LENGTH \
+    MAX_MODEL_LEN \
+    ROLLOUT_TP_SIZE \
+    ROLLOUT_GPU_MEMORY_UTILIZATION \
+    ENABLE_THINKING \
+    SDPO_ARM; do
+    add_optional_env "$key"
+done
+
 if [ "$MOUNT_PROJECT" = "1" ]; then
     DOCKER_ARGS+=(-v "${PROJECT_ROOT}:${PROJECT_ROOT}")
 fi

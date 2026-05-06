@@ -102,6 +102,46 @@ Use `SMOKE_MODE=sdpo` only after GRPO smoke proves the engine path.
   - hybrid KV page-size errors
   - immediate Tau3 parser/tool-call regression
 
+## vLLM V1 Hybrid-KV Smoke Matrix
+
+The launcher now emits explicit `--no-enable-prefix-caching` when `VLLM_ENABLE_PREFIX_CACHING=false`, and the image smoke script forwards the optional vLLM fallback knobs into the container. Smoke GRPO first; run SDPO only after the vLLM engine starts cleanly.
+
+1. Baseline:
+   ```bash
+   TAU3_VLLM_PROFILE=qwen35_v1 \
+   SMOKE_MODE=grpo \
+   bash scripts/p5_run_image_smoke_vllm_v1.sh
+   ```
+
+2. If the hybrid KV page-size error persists:
+   ```bash
+   VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER=true \
+   SMOKE_MODE=grpo \
+   bash scripts/p5_run_image_smoke_vllm_v1.sh
+   ```
+
+3. If needed, try aligned blocks with prefix caching enabled:
+   ```bash
+   VLLM_ENABLE_PREFIX_CACHING=true \
+   VLLM_BLOCK_SIZE=16 \
+   VLLM_MAMBA_BLOCK_SIZE=16 \
+   VLLM_MAMBA_CACHE_MODE=align \
+   SMOKE_MODE=grpo \
+   bash scripts/p5_run_image_smoke_vllm_v1.sh
+   ```
+
+4. Last alignment fallback:
+   ```bash
+   VLLM_ENABLE_PREFIX_CACHING=true \
+   VLLM_BLOCK_SIZE=8 \
+   VLLM_MAMBA_BLOCK_SIZE=8 \
+   VLLM_MAMBA_CACHE_MODE=align \
+   SMOKE_MODE=grpo \
+   bash scripts/p5_run_image_smoke_vllm_v1.sh
+   ```
+
+Use `VLLM_KV_CACHE_MEMORY_BYTES` only when logs indicate cache-capacity/profiling issues, not as the first response to page-size unification errors.
+
 ## Stop Conditions
 
 - If `vllm._C` fails to import, stop. The base image or mounted Python path is not coherent.

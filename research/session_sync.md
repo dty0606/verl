@@ -551,6 +551,24 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - Tau3 parser numeric type regression.
   - Bedrock credentials/model access failure during live user simulation.
 
+### 2026-05-06 environment majority-vote update
+
+- Six-way QC aligned on the environment path:
+  - The corporate Windows RTX 3080 laptop can validate repo scripts, probes, and basic `nvidia-smi`, but it cannot prove P5/H100 vLLM, NCCL, FlashInfer, Ray, or 32K-context behavior without WSL/Docker/Linux GPU runtime.
+  - The current SageMaker Code Editor P5 space cannot run Docker-in-Docker. Docker/ECR remains reproducibility infrastructure, but image build must happen outside this SM CE space or on a Docker-enabled SageMaker domain.
+  - For runnable paper-style SDPO today, prefer latest-VERL `SDPO_ARM=original` over old-repo `SDPO-paper-original`, unless the goal is specifically a historical-code ablation. Use `SDPO_ARM=original` or `SDPO_ARM=paper`; the launcher does not accept literal `paper_original`.
+- Added reproducibility helpers:
+  - `scripts/probe_runtime_surface.py` emits a read-only JSON runtime surface probe for local/P5.
+  - `scripts/p5_export_frozen_env.sh` exports a no-Docker frozen env manifest from the active P5 conda env.
+- Hardened vLLM V1 smoke mechanics:
+  - `build_cli_args_from_config` now normalizes snake_case config keys to kebab-case CLI flags and emits explicit `--no-*` flags for selected vLLM BooleanOptionalAction options such as `enable_prefix_caching=false`.
+  - `scripts/p5_run_image_smoke_vllm_v1.sh` now forwards optional hybrid-KV/mamba/cache and training-size env knobs into the Docker smoke container.
+- P5 smoke order for vLLM 0.20.x/V1:
+  1. Current baseline with `TAU3_VLLM_PROFILE=qwen35_v1`.
+  2. If page-size error persists, try `VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER=true`.
+  3. If needed, try aligned cache blocks with prefix caching enabled: `VLLM_ENABLE_PREFIX_CACHING=true VLLM_BLOCK_SIZE=16 VLLM_MAMBA_BLOCK_SIZE=16 VLLM_MAMBA_CACHE_MODE=align`, then a block-8 variant.
+  4. Only use `VLLM_KV_CACHE_MEMORY_BYTES` after logs show capacity/profiling issues rather than page-size unification.
+
 ## Evidence Carried Forward
 
 From the old repo:

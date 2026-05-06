@@ -274,6 +274,25 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
+_EXPLICIT_FALSE_BOOLEAN_CLI_KEYS = {
+    "enable-prefix-caching",
+    "enable_prefix_caching",
+    "enable-chunked-prefill",
+    "enable_chunked_prefill",
+    "enforce-eager",
+    "enforce_eager",
+    "disable-hybrid-kv-cache-manager",
+    "disable_hybrid_kv_cache_manager",
+    "disable-cascade-attn",
+    "disable_cascade_attn",
+}
+
+
+def _as_cli_key(key: str) -> str:
+    # vLLM's public CLI uses kebab-case flags. Hydra configs often use snake_case.
+    return key.replace("_", "-")
+
+
 def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
@@ -281,7 +300,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: skipped, except for selected vLLM BooleanOptionalAction flags
+      where false must be explicit as '--no-key'
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -295,21 +315,24 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     cli_args = []
     for k, v in config.items():
+        cli_key = _as_cli_key(k)
         if v is None:
             continue
         if isinstance(v, bool):
             if v:
-                cli_args.append(f"--{k}")
+                cli_args.append(f"--{cli_key}")
+            elif k in _EXPLICIT_FALSE_BOOLEAN_CLI_KEYS:
+                cli_args.append(f"--no-{cli_key}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value
                 continue
             # Lists need to be expanded as multiple separate arguments
             # e.g., --cuda-graph-sizes 1 2 4 8 becomes ['--cuda-graph-sizes', '1', '2', '4', '8']
-            cli_args.append(f"--{k}")
+            cli_args.append(f"--{cli_key}")
             cli_args.extend([str(item) for item in v])
         else:
-            cli_args.append(f"--{k}")
+            cli_args.append(f"--{cli_key}")
             # Use json.dumps for dict to ensure valid JSON format
             cli_args.append(json.dumps(v) if isinstance(v, dict) else str(v))
     return cli_args
