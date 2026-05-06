@@ -394,6 +394,17 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - **Corrected interpretation**: GRPO step 300 achieves **35.4% pass^1** on canonical test20 with the fixed parser. The true policy ceiling is likely higher (context-length failures mask ~25% of rollouts). Extending training or increasing MAX_MODEL_LEN are both viable next steps, but the current number is sufficient for the SDPO comparison baseline.
 - Artifact: `research/diagnostics/eval_grpo_r16k_step300_test20_v2.tar.gz` (11MB, 240 trajectories + results.json + eval log).
 
+### 2026-05-05 v3 diagnostic: parser import path root cause
+
+- v3 diagnostic patch (`patch_eval_v3_diagnostics.py`) added a startup sanity check that prints `PARSER_FILE`, asserts int types for numeric XML params, and logs `PRE_ENV_ACTION_FOR_ENV` before `env.step()`.
+- **Root cause found**: the eval subprocess imports `verl.utils.tau3_action_parser` from `~/SDPO-qwen35/verl/utils/tau3_action_parser.py` (the OLD repo), NOT from `~/verl_tau3_sdpo/verl/utils/tau3_action_parser.py` (this repo).
+- Diagnostic proof: `PARSER_FILE=/home/sagemaker-user/SDPO-qwen35/verl/utils/tau3_action_parser.py`, `PARSER_TYPES={'nonfree_baggages': 'str', 'total_baggages': 'str'}`, assertion failed.
+- Why `PYTHONPATH` didn't help: the eval script lives at `~/SDPO-qwen35/scripts/eval_tau3_base_models.py`. When Python resolves `from verl.utils.tau3_action_parser import ...`, it finds the `verl/` package in the old repo's directory tree before checking `PYTHONPATH` entries, because the old repo's directory is implicitly on `sys.path` (script's parent or `.pth` file).
+- **Fix**: `eval_tau3_paired.sh` now copies the active parser into `~/SDPO-qwen35/verl/utils/tau3_action_parser.py` before launching eval subprocesses. This is belt-and-suspenders: even if Python resolves `verl` from the old repo, it gets the fixed code.
+- **Implication**: v1, v2, and v3 full-run results (pass^1=0.342/0.354/0.350) all used the UNFIXED parser. The true corrected numbers require a v4 run after copying the parser to the old repo.
+- v3 full-run numbers (pass^1=0.350) are still valid as a stochastic replicate of the unfixed parser, confirming v1/v2 are in the same noise band.
+- Next: run v4 with the parser actually fixed in both repos, then compare to v1-v3 to measure the real parser-fix delta.
+
 ### 2026-05-05 SDPO vanilla_peer full baseline status (us-east-1)
 
 - Running on us-east-1 P5, at step 50/300 as of this update.

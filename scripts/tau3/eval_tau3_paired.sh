@@ -54,6 +54,14 @@ export VLLM_LANGUAGE_MODEL_ONLY="${VLLM_LANGUAGE_MODEL_ONLY:-true}"
 # The historical eval entrypoint can live outside this checkout. Put the active
 # repo first so it imports the current Tau3 parser/diagnostics instead of stale
 # installed or sibling-repo modules.
+#
+# CRITICAL: Python resolves `import verl` to whichever verl/ package it finds
+# first. If the eval script lives in ~/SDPO-qwen35/ and that directory has its
+# own verl/ package, Python may resolve to the OLD repo's parser even with
+# PYTHONPATH set. To guarantee the correct parser is used:
+# 1. Clear all pyc caches in both repos
+# 2. Copy the active parser into the old repo (belt-and-suspenders)
+# 3. Set PYTHONPATH with this repo first
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
 # --- Clear stale bytecode caches to prevent import of old .pyc ---
@@ -62,6 +70,9 @@ find "$(pwd)/verl" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || 
 if [ -d "$HOME/SDPO-qwen35/verl" ]; then
     find "$HOME/SDPO-qwen35/verl" -name "*.pyc" -delete 2>/dev/null || true
     find "$HOME/SDPO-qwen35/verl" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+    # Copy the active parser into the old repo so even if Python resolves verl/
+    # from there, it gets the fixed version.
+    cp "$(pwd)/verl/utils/tau3_action_parser.py" "$HOME/SDPO-qwen35/verl/utils/tau3_action_parser.py" 2>/dev/null || true
 fi
 
 # V3 diagnostics are intentionally applied to the external historical eval
