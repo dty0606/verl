@@ -445,6 +445,26 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Run is healthy (GPUs at 86-100% utilization, ~550s/step). ETA ~70 more hours for remaining 250 steps.
 - Key question for analysis: what fraction of the 300 steps will have nonzero SDPO signal? If <10%, the vanilla_peer arm may need easier task sampling or curriculum.
 
+### 2026-05-05 GRPO fixed-parser continuation readiness
+
+- Decision: continue GRPO from the existing step-300 FSDP checkpoint for 200 more steps rather than restarting from SFT. The parser bug affected training rewards only on numeric-argument tool calls, so continuation is the fastest way to test whether the corrected reward interface unlocks additional progress.
+- Updated `run_local_tau3_grpo_live_p5.sh` to expose the required continuation knobs as environment variables:
+  - `RESUME_MODE` and `RESUME_FROM_PATH` for explicit checkpoint resume.
+  - `CHECKPOINT_SAVE_CONTENTS` and `CHECKPOINT_LOAD_CONTENTS` for checkpoint contents.
+  - `MAX_ACTOR_CKPT_TO_KEEP` and `MAX_CRITIC_CKPT_TO_KEEP` for optional retention.
+- Use `RESUME_MODE=resume_path` plus the exact old `global_step_300` checkpoint path. Do not rely on `resume_mode=auto`, because compact experiment names changed after the original long-name GRPO run and auto-resume may otherwise start a fresh compact-name run from SFT.
+- Recommended continuation config:
+  - New suffix: `grpo_r16k_fixedparser_cont200`.
+  - `TOTAL_TRAINING_STEPS=500`, `TOTAL_EPOCHS=500`.
+  - `SAVE_FREQ=50`, `TEST_FREQ=50`, `VAL_N=4`.
+  - `CHECKPOINT_SAVE_CONTENTS=["model","optimizer","extra","hf_model"]` so checkpoints at 350/400/450/500 include eval-ready HF weights under `actor/huggingface/`.
+- Remote P5 must verify before launch:
+  - `bash -n run_local_tau3_grpo_live_p5.sh`.
+  - `git rev-parse HEAD` is at or after this readiness update.
+  - The resume path contains `actor/model_world_size_8_rank_0.pt` through rank 7 and `data.pt`.
+  - A Python parser sanity check returns int types for Qwen XML numeric parameters.
+- Suggested stop conditions: resume load fails; first step prints "Training from scratch"; checkpoint save does not create `actor/huggingface/model*.safetensors` or equivalent HF weights after the first save; reward/terminal metrics collapse like the failed SDPO run.
+
 ## Evidence Carried Forward
 
 From the old repo:

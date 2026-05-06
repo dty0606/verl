@@ -45,6 +45,10 @@ if [ ! -f "$TASK_DIR/train.parquet" ] || [ ! -f "$TASK_DIR/test.parquet" ]; then
 fi
 
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
+RESUME_MODE="${RESUME_MODE:-auto}"
+RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
+CHECKPOINT_SAVE_CONTENTS="${CHECKPOINT_SAVE_CONTENTS:-}"
+CHECKPOINT_LOAD_CONTENTS="${CHECKPOINT_LOAD_CONTENTS:-}"
 
 compact_model_name() {
     local model_path="$1"
@@ -100,10 +104,26 @@ ARGS=(
     "trainer.total_training_steps=${TOTAL_TRAINING_STEPS:-300}"
     "trainer.test_freq=${TEST_FREQ:-30}"
     "trainer.save_freq=${SAVE_FREQ:-30}"
+    "trainer.resume_mode=$RESUME_MODE"
     "trainer.n_gpus_per_node=${N_GPUS_PER_NODE:-8}"
     "trainer.nnodes=${NNODES:-1}"
 )
 
+if [ -n "$RESUME_FROM_PATH" ]; then
+    ARGS+=("trainer.resume_from_path=$RESUME_FROM_PATH")
+fi
+if [ -n "$CHECKPOINT_SAVE_CONTENTS" ]; then
+    ARGS+=("actor_rollout_ref.actor.checkpoint.save_contents=$CHECKPOINT_SAVE_CONTENTS")
+fi
+if [ -n "$CHECKPOINT_LOAD_CONTENTS" ]; then
+    ARGS+=("actor_rollout_ref.actor.checkpoint.load_contents=$CHECKPOINT_LOAD_CONTENTS")
+fi
+if [ -n "${MAX_ACTOR_CKPT_TO_KEEP:-}" ]; then
+    ARGS+=("trainer.max_actor_ckpt_to_keep=$MAX_ACTOR_CKPT_TO_KEEP")
+fi
+if [ -n "${MAX_CRITIC_CKPT_TO_KEEP:-}" ]; then
+    ARGS+=("trainer.max_critic_ckpt_to_keep=$MAX_CRITIC_CKPT_TO_KEEP")
+fi
 if [ -n "${ROLLOUT_DATA_DIR:-}" ]; then
     ARGS+=("trainer.rollout_data_dir=$ROLLOUT_DATA_DIR")
 fi
@@ -119,6 +139,13 @@ echo "Model alias: $MODEL_NAME"
 echo "Task dir: $TASK_DIR"
 echo "Thinking: ${ENABLE_THINKING:-true}"
 echo "Rollout n: ${ROLLOUT_BATCH_SIZE:-8}"
+echo "Resume mode: $RESUME_MODE"
+if [ -n "$RESUME_FROM_PATH" ]; then
+    echo "Resume path: $RESUME_FROM_PATH"
+fi
+if [ -n "$CHECKPOINT_SAVE_CONTENTS" ]; then
+    echo "Checkpoint save contents: $CHECKPOINT_SAVE_CONTENTS"
+fi
 echo "----------------------------------------------------------------"
 
 python3 -m verl.trainer.main_ppo "${ARGS[@]}" "${@:4}"
