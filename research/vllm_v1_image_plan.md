@@ -8,7 +8,7 @@ Build one reproducible container image for Tau3 latest-VERL runs on vLLM 0.20.x 
 
 ## Image Strategy
 
-- Base image: `vllm/vllm-openai:v0.20.0-cu129`.
+- Base image: `vllm/vllm-openai:v0.20.1-cu129`.
 - Reason: the official vLLM image pins the hard part of the stack, namely vLLM, PyTorch, CUDA runtime, and compiled extensions.
 - Layer on top:
   - latest-VERL repo code with `pip install -e . --no-deps`
@@ -85,6 +85,62 @@ SMOKE_MODE=grpo bash scripts/p5_run_image_smoke_vllm_v1.sh
 
 Use `SMOKE_MODE=sdpo` only after GRPO smoke proves the engine path.
 
+## Conda Capacity Matrix For SM Code Editor
+
+SageMaker Code Editor may be container-based and unable to run Docker. In that
+case, use the isolated conda env path first, then run the same ordered vLLM V1
+capacity ladder without Docker.
+
+```bash
+cd ~/verl_tau3_sdpo
+
+ENV_NAME=sdpo-vllm20-v1 \
+VLLM_VERSION=0.20.1 \
+bash scripts/p5_setup_vllm_v1_env.sh
+
+conda activate sdpo-vllm20-v1
+export VLLM_USE_V1=1
+export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
+export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
+export MODEL_PATH=~/verl_tau3_sdpo/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface
+export TASK_PATH=datasets/tau3_live_airline_canonical_json
+
+bash scripts/p5_run_vllm_v1_capacity_matrix.sh
+```
+
+The current Dockerfile is pinned to `vllm/vllm-openai:v0.20.1-cu129`, the
+latest vLLM 0.20.x tag available during the 2026-05-06 QC pass. If Qwen3.5
+hybrid KV support regresses on `0.20.1`, fall back explicitly to the previous
+known tag rather than relying on `latest`:
+
+```bash
+BASE_IMAGE=vllm/vllm-openai:v0.20.0-cu129 \
+ECR_REPOSITORY=tau3-verl-vllm-v1 \
+bash scripts/p5_build_push_ecr_vllm_v1.sh
+```
+
+Do not rely on `latest` for the paper artifact unless the resulting image
+digest is recorded and promoted to a pinned ECR tag.
+
+## vLLM V1 Capacity Ladder
+
+Run the capacity matrix in this order and stop escalating once a profile is both
+stable and fast enough for overnight experiments:
+
+1. `auto_no_prefix_24k_48k`: compatibility proof. This keeps prefix caching
+   disabled and uses normal KV cache.
+2. `auto_prefix_24k_48k`: speed proof for shared Tau3 prefixes.
+3. `fp8_no_prefix_24k_48k`: capacity proof for FP8 KV cache without prefix
+   caching confounds.
+4. `fp8_prefix_24k_48k`: combined speed/capacity proof at the recommended
+   near-term training budget.
+5. `fp8_prefix_32k_64k`: stretch proof for doubling from the old 16K/32K
+   budget.
+
+All launcher paths now default `TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0`, which
+turns off duplicated full-transcript observations while preserving historical
+actor `<think>` messages in the actual chat history.
+
 ## Success Criteria
 
 - Image builds and pushes to ECR.
@@ -101,6 +157,11 @@ Use `SMOKE_MODE=sdpo` only after GRPO smoke proves the engine path.
   - `cuda_runtime.h` FlashInfer/GDN JIT errors
   - hybrid KV page-size errors
   - immediate Tau3 parser/tool-call regression
+- Capacity matrix identifies the largest stable profile among:
+  - BF16/auto KV cache at 24K response / 48K model length
+  - prefix caching at 24K response / 48K model length
+  - FP8 KV cache at 24K response / 48K model length
+  - FP8 KV cache + prefix caching at 32K response / 64K model length
 
 ## vLLM V1 Hybrid-KV Smoke Matrix
 

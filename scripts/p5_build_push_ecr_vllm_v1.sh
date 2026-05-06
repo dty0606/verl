@@ -5,7 +5,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERFILE="${DOCKERFILE:-docker/Dockerfile.tau3.vllm20.v1}"
-BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:v0.20.0-cu129}"
+BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:v0.20.1-cu129}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 ECR_REPOSITORY="${ECR_REPOSITORY:-tau3-verl-vllm20-v1}"
 PLATFORM="${PLATFORM:-linux/amd64}"

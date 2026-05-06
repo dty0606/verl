@@ -530,7 +530,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - `scripts/p5_run_image_smoke_vllm_v1.sh`
   - `research/vllm_v1_image_plan.md`
 - Image strategy:
-  - Base image: `vllm/vllm-openai:v0.20.0-cu129`.
+  - Base image: `vllm/vllm-openai:v0.20.1-cu129` after the 2026-05-06 latest-vLLM QC update.
   - The "openai" label means OpenAI-compatible HTTP API shape, not OpenAI API usage. We use it for the pinned vLLM/PyTorch/CUDA stack.
   - Layer latest-VERL Tau3 code and `tau2-bench` commit `220b47844fb74d4351037e81055cf1e2948e4734`.
   - Keep datasets, checkpoints, W&B, and outputs mounted from the P5 host rather than baked into the image.
@@ -568,6 +568,28 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   2. If page-size error persists, try `VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER=true`.
   3. If needed, try aligned cache blocks with prefix caching enabled: `VLLM_ENABLE_PREFIX_CACHING=true VLLM_BLOCK_SIZE=16 VLLM_MAMBA_BLOCK_SIZE=16 VLLM_MAMBA_CACHE_MODE=align`, then a block-8 variant.
   4. Only use `VLLM_KV_CACHE_MEMORY_BYTES` after logs show capacity/profiling issues rather than page-size unification.
+
+### 2026-05-06 latest vLLM V1 environment QC
+
+- Stage-1 QC result:
+  - Current repo is suitable for a Kiro/P5 environment bring-up once the vLLM V1 capacity-matrix changes are pushed.
+  - vLLM latest PyPI/Docker tag checked on 2026-05-06 is `0.20.1`; defaults now use `vllm/vllm-openai:v0.20.1-cu129` and `VLLM_VERSION=0.20.1`.
+  - `0.20.0` remains the explicit fallback tag if Qwen3.5 hybrid KV support regresses on `0.20.1`.
+- No-Docker SM Code Editor path:
+  - Use `scripts/p5_setup_vllm_v1_env.sh` to create `sdpo-vllm20-v1`.
+  - Use `scripts/p5_run_vllm_v1_capacity_matrix.sh` to run the ordered capacity ladder without Docker.
+- Capacity ladder:
+  1. `auto_no_prefix_24k_48k`
+  2. `auto_prefix_24k_48k`
+  3. `fp8_no_prefix_24k_48k`
+  4. `fp8_prefix_24k_48k`
+  5. `fp8_prefix_32k_64k`
+- All current launchers default `TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0`, preserving historical actor `<think>` in the actual chat history while avoiding duplicated full-transcript observations from Tau3 Gym.
+- Stage-2 mitigation work should start with diagnostics-only changes unless explicitly requested otherwise:
+  - runtime fallback default for Tau3 all-messages observations,
+  - component token/repetition diagnostics,
+  - rollout dump enrichment.
+  - Defer length-clipped sample masking until diagnostics confirm it is needed, because it changes the optimization objective.
 
 ## Evidence Carried Forward
 

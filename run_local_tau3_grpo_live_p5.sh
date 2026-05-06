@@ -23,6 +23,7 @@ esac
 
 export TAU3_LIVE_RUNTIME="${TAU3_LIVE_RUNTIME:-official_gym}"
 export TAU3_LIVE_FEEDBACK_FORMAT="$FEEDBACK_MODE"
+export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION="${TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION:-0}"
 export PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 export USER="${USER:-$(whoami)}"
@@ -182,6 +183,12 @@ fi
 if [ -n "${VLLM_KV_CACHE_MEMORY_BYTES:-}" ]; then
     ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_memory_bytes=$VLLM_KV_CACHE_MEMORY_BYTES")
 fi
+if [ -n "${VLLM_KV_CACHE_DTYPE:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=$VLLM_KV_CACHE_DTYPE")
+fi
+if [ -n "${VLLM_CALCULATE_KV_SCALES:-}" ]; then
+    ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.calculate_kv_scales=$VLLM_CALCULATE_KV_SCALES")
+fi
 if [ -n "${VLLM_DISABLE_CASCADE_ATTN:-}" ]; then
     ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_cascade_attn=$VLLM_DISABLE_CASCADE_ATTN")
 fi
@@ -198,6 +205,8 @@ echo "Max response length: ${MAX_RESPONSE_LENGTH:-16384}"
 echo "vLLM profile: $TAU3_VLLM_PROFILE"
 echo "VLLM_USE_V1: ${VLLM_USE_V1:-<unset>}"
 echo "vLLM prefix/chunked/max-batched/eager: ${VLLM_ENABLE_PREFIX_CACHING:-<config>}/${VLLM_ENABLE_CHUNKED_PREFILL:-<config>}/${VLLM_MAX_NUM_BATCHED_TOKENS:-<config>}/${VLLM_ENFORCE_EAGER:-<config>}"
+echo "vLLM KV dtype/scales: ${VLLM_KV_CACHE_DTYPE:-auto}/${VLLM_CALCULATE_KV_SCALES:-<config>}"
+echo "Tau3 all-messages observation: $TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION"
 echo "Resume mode: $RESUME_MODE"
 if [ -n "$RESUME_FROM_PATH" ]; then
     echo "Resume path: $RESUME_FROM_PATH"

@@ -1,10 +1,10 @@
-# Tau3 latest-VERL image for vLLM V1 / vLLM 0.20 smoke and training.
+# Tau3 latest-VERL image for vLLM V1 / vLLM 0.20.x smoke and training.
 #
 # This intentionally starts from vLLM's official OpenAI-compatible serving image.
 # "openai" here means API-compatible server shape; the image does not call
 # OpenAI. We use it as a pinned torch/vLLM/CUDA base to avoid ABI drift.
 
-ARG BASE_IMAGE=vllm/vllm-openai:v0.20.0-cu129
+ARG BASE_IMAGE=vllm/vllm-openai:v0.20.1-cu129
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive

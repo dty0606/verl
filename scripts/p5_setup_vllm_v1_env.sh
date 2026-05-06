@@ -9,7 +9,7 @@ set -euo pipefail
 
 ENV_NAME="${ENV_NAME:-sdpo-vllm20-v1}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-VLLM_VERSION="${VLLM_VERSION:-0.20.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.20.1}"
 TORCH_BACKEND="${TORCH_BACKEND:-cu129}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
