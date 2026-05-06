@@ -535,8 +535,10 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - Layer latest-VERL Tau3 code and `tau2-bench` commit `220b47844fb74d4351037e81055cf1e2948e4734`.
   - Keep datasets, checkpoints, W&B, and outputs mounted from the P5 host rather than baked into the image.
 - ECR flow:
-  - Build/push with `AWS_REGION`, `ECR_REPOSITORY`, and `IMAGE_TAG`.
+  - GitHub is only for Codex/Kiro synchronization. P5 has no Git requirement; Kiro should sync the repo snapshot to S3, P5 should pull from S3, and the P5 build should pass `SOURCE_REVISION=<github_commit_short_sha>`.
+  - Build/push on P5 with `AWS_REGION`, `ECR_REPOSITORY`, `SOURCE_REVISION`, and `IMAGE_TAG`.
   - Script creates the ECR repo if missing, logs in, builds, runs baked-image preflight, tags, pushes, and prints final `image_uri` plus digest.
+  - Do not use the corporate laptop to validate the Docker image. The laptop can do lightweight checks, but the authoritative build/smoke must be on P5 because that is the target GPU/CUDA/vLLM surface.
 - Smoke flow:
   - `SMOKE_MODE=image_preflight` runs the vLLM V1 preflight against the baked image without mounting the host repo.
   - `SMOKE_MODE=preflight` runs the vLLM V1 preflight against the mounted P5 repo/checkpoint/dataset.

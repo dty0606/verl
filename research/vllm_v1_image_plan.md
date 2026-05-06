@@ -25,16 +25,49 @@ Build one reproducible container image for Tau3 latest-VERL runs on vLLM 0.20.x 
 
 ## P5 Build And Push
 
+P5 instances do not need Git metadata for this flow. Use GitHub only between Codex/Kiro, then sync the repo snapshot to P5 through S3. Pass the Git commit as `SOURCE_REVISION` so the image tag and ECR metadata still record the exact source version.
+
+Do not build this image on the corporate laptop for validation. The laptop can run light syntax/docs checks, but the Docker build and smoke must happen on P5 because the image needs to prove the P5 GPU/CUDA/vLLM runtime.
+
 ```bash
+# Kiro/local side: after pulling the GitHub commit, publish the repo snapshot for P5.
+cd ~/verl_tau3_sdpo
+SOURCE_REVISION="$(git rev-parse --short HEAD)"
+
+aws s3 sync ~/verl_tau3_sdpo/ s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/repo/ \
+  --exclude ".git/*" \
+  --exclude "datasets/*" \
+  --exclude "checkpoints/*" \
+  --exclude "outputs/*" \
+  --exclude "output/*" \
+  --exclude "wandb/*" \
+  --exclude "logs/*" \
+  --region us-west-2
+```
+
+```bash
+# P5 side: pull the repo snapshot from S3, then build and push from P5.
+mkdir -p ~/verl_tau3_sdpo
+aws s3 sync s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/repo/ ~/verl_tau3_sdpo/ \
+  --exclude ".git/*" \
+  --exclude "datasets/*" \
+  --exclude "checkpoints/*" \
+  --exclude "outputs/*" \
+  --exclude "output/*" \
+  --exclude "wandb/*" \
+  --exclude "logs/*" \
+  --region us-west-2
+
 cd ~/verl_tau3_sdpo
 
 AWS_REGION=us-east-1 \
 ECR_REPOSITORY=tau3-verl-vllm20-v1 \
-IMAGE_TAG=20260506-d880bc31 \
+SOURCE_REVISION=<github_commit_short_sha> \
+IMAGE_TAG=20260506-<github_commit_short_sha> \
 bash scripts/p5_build_push_ecr_vllm_v1.sh
 ```
 
-The script prints the final `image_uri`. Use that exact URI for the smoke script.
+The script does not require `git` on P5. It prints the final `image_uri` and digest. Use that exact URI for the smoke script.
 
 ## P5 Smoke
 

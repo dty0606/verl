@@ -8,8 +8,6 @@ DOCKERFILE="${DOCKERFILE:-docker/Dockerfile.tau3.vllm20.v1}"
 BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:v0.20.0-cu129}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 ECR_REPOSITORY="${ECR_REPOSITORY:-tau3-verl-vllm20-v1}"
-IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d)-$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)}"
-LOCAL_IMAGE="${LOCAL_IMAGE:-tau3-verl-vllm20-v1:${IMAGE_TAG}}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 TAU2_COMMIT="${TAU2_COMMIT:-220b47844fb74d4351037e81055cf1e2948e4734}"
 BUILD_CONTEXT="${BUILD_CONTEXT:-$PROJECT_ROOT}"
@@ -25,9 +23,27 @@ require_cmd() {
 
 require_cmd aws
 require_cmd docker
-require_cmd git
 
-if [ "$ALLOW_DIRTY_IMAGE_BUILD" != "1" ] && [ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=no)" ]; then
+GIT_AVAILABLE=0
+if command -v git >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.git" ]; then
+    GIT_AVAILABLE=1
+fi
+
+SOURCE_REVISION="${SOURCE_REVISION:-${GIT_COMMIT:-}}"
+FULL_SOURCE_REVISION="${FULL_SOURCE_REVISION:-}"
+if [ "$GIT_AVAILABLE" = "1" ]; then
+    SOURCE_REVISION="${SOURCE_REVISION:-$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)}"
+    FULL_SOURCE_REVISION="${FULL_SOURCE_REVISION:-$(git -C "$PROJECT_ROOT" rev-parse HEAD)}"
+else
+    SOURCE_REVISION="${SOURCE_REVISION:-s3sync-$(date -u +%Y%m%dT%H%M%SZ)}"
+    FULL_SOURCE_REVISION="${FULL_SOURCE_REVISION:-$SOURCE_REVISION}"
+    echo "Warning: Git metadata not available under $PROJECT_ROOT; using SOURCE_REVISION=$SOURCE_REVISION" >&2
+fi
+
+IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d)-${SOURCE_REVISION}}"
+LOCAL_IMAGE="${LOCAL_IMAGE:-tau3-verl-vllm20-v1:${IMAGE_TAG}}"
+
+if [ "$GIT_AVAILABLE" = "1" ] && [ "$ALLOW_DIRTY_IMAGE_BUILD" != "1" ] && [ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=no)" ]; then
     echo "Error: tracked working tree changes are present. Commit/push before building a reproducible image." >&2
     echo "Set ALLOW_DIRTY_IMAGE_BUILD=1 only for throwaway debugging images." >&2
     git -C "$PROJECT_ROOT" status --short --untracked-files=no >&2
@@ -47,6 +63,7 @@ echo "Platform: $PLATFORM"
 echo "ECR repo: $ECR_REPOSITORY"
 echo "AWS region: $AWS_REGION"
 echo "Image URI: $IMAGE_URI"
+echo "Source revision: $FULL_SOURCE_REVISION"
 echo "----------------------------------------------------------------"
 
 aws ecr describe-repositories \
@@ -93,6 +110,7 @@ cat <<EOF
   "base_image": "$BASE_IMAGE",
   "aws_region": "$AWS_REGION",
   "ecr_repository": "$ECR_REPOSITORY",
-  "git_commit": "$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+  "source_revision": "$FULL_SOURCE_REVISION",
+  "git_metadata_available": "$GIT_AVAILABLE"
 }
 EOF
