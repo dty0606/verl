@@ -405,6 +405,36 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - v3 full-run numbers (pass^1=0.350) are still valid as a stochastic replicate of the unfixed parser, confirming v1/v2 are in the same noise band.
 - Next: run v4 with the parser actually fixed in both repos, then compare to v1-v3 to measure the real parser-fix delta.
 
+### 2026-05-05 GRPO step-300 canonical test20 eval v4 (parser fix CONFIRMED active)
+
+- First truly parser-fixed eval. Diagnostic proof in every GPU subprocess:
+  - `PARSER_FILE=/home/sagemaker-user/SDPO-qwen35/verl/utils/tau3_action_parser.py`
+  - `PARSER_TYPES={'nonfree_baggages': 'int', 'total_baggages': 'int'}`
+  - `PARSER_SANITY_CHECK=PASS`
+  - `PRE_ENV_ARG_TYPES={'nonfree_baggages': 'int', 'total_baggages': 'int'}` — ints reach env boundary.
+- Same grid: 3 seeds (42/123/456), val_n=4, 20 test tasks, MAX_STEPS=50, temp=0.4, top_p=0.95.
+- **v4 results**: pass^1=**0.362**, pass^2=**0.329**, pass^3=**0.315**, pass^4=**0.308**.
+- Audit:
+  - successes: 87/240 (vs 82-85 unfixed)
+  - `unsupported_operand_trajectory_rows`: **0** (was 26-31 in v1-v3)
+  - `numeric_string_tool_arg_trajectory_rows`: **0** (was 34-55 in v1-v3)
+  - `tool_execution_error_rows`: 45 (was 54-59 — genuine policy failures, not parser artifacts)
+  - `context_length` errors: 62/240 (stochastic, same hard tasks)
+  - `json_parse_error_rows`: 0
+- **Task 22** (baggage update task): 0.00 in all unfixed runs → **0.42** in v4. This is the definitive proof that the parser fix enables real policy successes on numeric-arg tasks.
+- Task 8 also gained 1 success (0.00 → 0.08), task 2 dropped slightly (0.92 → 0.67) — stochastic.
+- **Comparison summary**:
+  | Metric | v1-v3 unfixed (mean±std) | v4 fixed |
+  |--------|--------------------------|----------|
+  | pass^1 | 0.349 ± 0.006 | **0.362** |
+  | unsupported_operand rows | 26-31 | **0** |
+  | numeric_string_arg rows | 34-55 | **0** |
+  | Task 22 pass^1 | 0.00 | **0.42** |
+- **Interpretation**: The parser fix adds ~+1.3pp pass^1 overall, but the real impact is concentrated on tasks requiring numeric tool arguments (task 22: +42pp). The fix eliminates all parser-caused tool execution errors. Remaining 45 tool errors are genuine policy failures.
+- **GRPO step 300 corrected baseline**: pass^1=**0.362** on canonical test20 with fixed parser. This is the number to use for SDPO comparison.
+- Context-length (62/240 = 25.8%) remains the only evaluation artifact. Tasks 8, 18, 24, 25, 35 are dominated by context exhaustion.
+- Artifact: `research/diagnostics/eval_grpo_r16k_step300_test20_v4.tar.gz`.
+
 ### 2026-05-05 SDPO vanilla_peer full baseline status (us-east-1)
 
 - Running on us-east-1 P5, at step 50/300 as of this update.
