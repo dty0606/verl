@@ -72,7 +72,8 @@ if [ -d "$HOME/SDPO-qwen35/verl" ]; then
     find "$HOME/SDPO-qwen35/verl" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
     # Copy the active parser into the old repo so even if Python resolves verl/
     # from there, it gets the fixed version.
-    cp "$(pwd)/verl/utils/tau3_action_parser.py" "$HOME/SDPO-qwen35/verl/utils/tau3_action_parser.py" 2>/dev/null || true
+    cp "$(pwd)/verl/utils/tau3_action_parser.py" "$HOME/SDPO-qwen35/verl/utils/tau3_action_parser.py"
+    cmp -s "$(pwd)/verl/utils/tau3_action_parser.py" "$HOME/SDPO-qwen35/verl/utils/tau3_action_parser.py"
 fi
 
 # V3 diagnostics are intentionally applied to the external historical eval

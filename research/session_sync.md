@@ -375,12 +375,12 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Updated `scripts/tau3/eval_tau3_paired.sh` to put the active checkout first in `PYTHONPATH`, because the historical Python evaluator may live outside this repo. Kiro should still port/copy the working evaluator into `scripts/tau3/eval_tau3_base_models.py` or explicitly verify it imports this repo's parser before rerunning final numbers.
 - Current interpretation: GRPO step 300 clearly improves over SFT and learns consistent simple/policy-boundary behavior, but the exact `34.2%` pass^1 may be a conservative lower bound. Re-run canonical test20 after parser fix before claiming GRPO maximum capacity or deciding whether to extend training.
 
-### 2026-05-05 GRPO step-300 canonical test20 eval v2 (parser fix confirmed)
+### 2026-05-05 GRPO step-300 canonical test20 eval v2 (later shown still unfixed)
 
-- Reran eval on us-west-2 P5 with parser fix at commit `d6c15789` confirmed active via `PYTHONPATH` (old eval script imports `from verl.utils.tau3_action_parser import parse_model_output_to_tau_action`).
+- Reran eval on us-west-2 P5 after commit `d6c15789`, but later v3 diagnostics showed the old external evaluator still imported `~/SDPO-qwen35/verl/utils/tau3_action_parser.py`. Treat v2 as another **unfixed-parser replicate**, not a true parser-fixed result.
 - Same grid: 3 seeds (42/123/456), val_n=4, 20 test tasks, MAX_STEPS=50, temp=0.4, top_p=0.95.
-- **Corrected results**: pass^1=**0.354**, pass^2=**0.342**, pass^3=**0.338**, pass^4=**0.333**.
-- Comparison with v1 (broken parser): pass^1 0.342→0.354 (+0.012), pass^4 0.317→0.333 (+0.016).
+- v2 observed results: pass^1=**0.354**, pass^2=**0.342**, pass^3=**0.338**, pass^4=**0.333**.
+- Comparison with v1: pass^1 0.342→0.354 (+0.012), pass^4 0.317→0.333 (+0.016). This is now interpreted as stochastic variation/noise, not confirmed parser-fix gain.
 - Notable task changes: task 16 (0→0.08, 1 new success), task 30 (0→0.08), task 48 (0.92→1.00).
 - Audit results (v2):
   - successes: 85/240 (was 82/240 in v1)
@@ -389,9 +389,9 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - numeric_string_tool_arg_trajectory_rows: 34 (was 55 — significantly reduced)
   - tool_execution_error_rows: 59
   - json_parse_error_rows: 0
-- Residual numeric-string issue: 26 trajectories still show `unsupported operand type` errors. The parser fix handles Qwen XML `<parameter=...>` values correctly, but there is likely a second source: either the tau2-bench gym itself coerces tool arguments to strings internally, or some model outputs use a format path that bypasses `parse_model_output_to_tau_action`. This is a tau2-bench evaluator issue, not a policy failure.
+- Residual numeric-string issue: 26 trajectories still show `unsupported operand type` errors. Later v3 diagnostics found the actual cause: the eval subprocess imported the old repo parser, so v2 did **not** prove any tau2-bench internal re-stringification.
 - Context-length remains the dominant artifact (61/240 = 25.4%). Tasks 18, 35 hit it on all 12 rollouts. These are genuinely hard multi-turn tasks where the model exhausts 32K context.
-- **Corrected interpretation**: GRPO step 300 achieves **35.4% pass^1** on canonical test20 with the fixed parser. The true policy ceiling is likely higher (context-length failures mask ~25% of rollouts). Extending training or increasing MAX_MODEL_LEN are both viable next steps, but the current number is sufficient for the SDPO comparison baseline.
+- Updated interpretation after v3: GRPO step 300 unfixed-parser replicates are v1=0.342, v2=0.354, v3=0.350. A true corrected baseline requires v4 after copying the fixed parser into the external old repo path.
 - Artifact: `research/diagnostics/eval_grpo_r16k_step300_test20_v2.tar.gz` (11MB, 240 trajectories + results.json + eval log).
 
 ### 2026-05-05 v3 diagnostic: parser import path root cause
