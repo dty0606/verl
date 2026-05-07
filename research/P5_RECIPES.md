@@ -1,6 +1,6 @@
 # P5 Recipes: Latest VERL tau3 Fork
 
-Date: 2026-05-02
+Date: 2026-05-07
 
 Old recipe book (historical reference only):
 
@@ -835,6 +835,76 @@ bash run_local_tau3_grpo_live_p5.sh \
 ```
 
 No LoRA. No `SFT_LORA_*` env vars. Full checkpoint loaded directly.
+
+---
+
+## Recipe 8A: Ten-Step vLLM V1 GRPO Readiness Smoke
+
+Use this after the `sdpo-vllm20-v1` preflight passes and the working west-P5
+auto-KV profiles are available. This is the final gate before a longer clean
+GRPO rerun: it runs only the known-good profile instead of the full capacity
+matrix.
+
+```bash
+cd ~/verl_tau3_sdpo_vllm20  # or ~/verl_tau3_sdpo on the target P5 snapshot
+source activate sdpo-vllm20-v1
+
+export MODEL_PATH=<path to final SFT global_step_*/huggingface>
+export MODEL_ALIAS=real_sft_step800
+export TASK_PATH=datasets/tau3_live_airline_canonical_json
+export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
+export TAU3_LIVE_RUNTIME=official_gym
+export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
+export TAU3_LIVE_FEEDBACK_FORMAT=json
+export VLLM_USE_V1=1
+export VLLM_KV_CACHE_DTYPE=auto
+export VLLM_ENABLE_PREFIX_CACHING=true
+export MAX_RESPONSE_LENGTH=24576
+export MAX_MODEL_LEN=49152
+export TRAIN_BATCH_SIZE=8
+export VAL_BATCH_SIZE=8
+export ROLLOUT_BATCH_SIZE=8
+export PPO_MINI_BATCH_SIZE=8
+export TOTAL_TRAINING_STEPS=10
+export TOTAL_EPOCHS=10
+export TEST_FREQ=10
+export SAVE_FREQ=10
+export MODE=grpo
+export CONTINUE_ON_FAIL=0
+export CAPACITY_PROFILES="02_auto_prefix_24k_48k"
+export PROJECT_NAME=SDPO-vllm-v1-readiness
+
+mkdir -p logs
+bash scripts/p5_run_vllm_v1_capacity_matrix.sh \
+  2>&1 | tee logs/grpo_vllm_v1_readiness_10step.log
+```
+
+Use `export` or one inline environment block as above. Bare assignments on
+separate lines are shell-local and will not be visible to the child bash script.
+
+Why `CAPACITY_PROFILES` matters: without it, the script runs the whole capacity
+matrix and may continue into FP8 or larger-context profiles. For this readiness
+gate we want only auto KV + prefix caching, because FP8 KV is still
+experimental for Qwen3.5 hybrid attention/linear-attention cache.
+
+Pass criteria:
+
+- Preflight prints `PREFLIGHT=PASS`.
+- The summary contains `PASS 02_auto_prefix_24k_48k`.
+- No prompt clipping and no repeated response/budget exhaustion collapse.
+- No vLLM `wake_up` / `update_weights` crash.
+- No repeated FlashInfer GDN JIT failure after warmup.
+- Pull 2-3 rollout JSONLs and confirm no open `<think>`, tag spam, or max-length repetitive continuation.
+
+Stop criteria:
+
+- `response_length/clip_ratio` or `tau3_live/budget_exhausted_fraction` is repeatedly above `0.30`.
+- `tau3_live/terminal_fraction` collapses near zero for multiple steps.
+- `prompt_length/clip_ratio` becomes nonzero.
+- vLLM throws hybrid-KV page-size, FP8 scale, ABI, or CUDA/GDN errors.
+
+If this passes, the next longer GRPO run should keep the same profile and only
+change `TOTAL_TRAINING_STEPS`, `TEST_FREQ`, `SAVE_FREQ`, and the run name.
 
 ---
 

@@ -21,6 +21,8 @@ MODE="${MODE:-grpo}" # grpo or sdpo
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-1}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_ROOT/logs/vllm_v1_capacity_matrix/$(date +%Y%m%d_%H%M%S)}"
 RUN_EXPERIMENTAL_FP8_SCALES="${RUN_EXPERIMENTAL_FP8_SCALES:-0}"
+CAPACITY_PROFILES="${CAPACITY_PROFILES:-all}"
+PROFILE_RUN_COUNT=0
 
 if [ -z "$MODEL_PATH" ]; then
     echo "Error: MODEL_PATH must point to the SFT HF checkpoint." >&2
@@ -72,6 +74,7 @@ echo "Task dir: $TASK_DIR"
 echo "Model path: $MODEL_PATH"
 echo "Mode: $MODE"
 echo "Log root: $LOG_ROOT"
+echo "Capacity profiles: $CAPACITY_PROFILES"
 echo "VLLM_USE_V1: $VLLM_USE_V1"
 echo "Tau3 all-messages observation: $TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION"
 echo "----------------------------------------------------------------"
@@ -120,6 +123,21 @@ run_profile() {
 run_or_record() {
     local name="$1"
     shift
+    if [ "$CAPACITY_PROFILES" != "all" ] && [ -n "$CAPACITY_PROFILES" ]; then
+        local requested
+        local selected=0
+        for requested in $CAPACITY_PROFILES; do
+            if [ "$requested" = "$name" ]; then
+                selected=1
+                break
+            fi
+        done
+        if [ "$selected" = "0" ]; then
+            echo "SKIP $name" | tee -a "$LOG_ROOT/summary.txt"
+            return 0
+        fi
+    fi
+    PROFILE_RUN_COUNT=$((PROFILE_RUN_COUNT + 1))
     if run_profile "$name" "$@"; then
         echo "PASS $name" | tee -a "$LOG_ROOT/summary.txt"
     else
@@ -142,6 +160,10 @@ if [ "$RUN_EXPERIMENTAL_FP8_SCALES" = "1" ]; then
 fi
 
 echo "----------------------------------------------------------------"
+if [ "$PROFILE_RUN_COUNT" -eq 0 ]; then
+    echo "No capacity profiles ran. Check CAPACITY_PROFILES='$CAPACITY_PROFILES'." | tee -a "$LOG_ROOT/summary.txt"
+    exit 1
+fi
 echo "Capacity matrix complete. Summary:"
 cat "$LOG_ROOT/summary.txt"
 echo "Logs: $LOG_ROOT"

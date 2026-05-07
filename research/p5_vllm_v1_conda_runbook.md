@@ -153,6 +153,32 @@ Gating run that stops on first failure:
 CONTINUE_ON_FAIL=0 MODE=grpo bash scripts/p5_run_vllm_v1_capacity_matrix.sh
 ```
 
+Ten-step readiness run for the known-good auto-KV + prefix-caching profile:
+
+```bash
+TOTAL_TRAINING_STEPS=10 \
+TOTAL_EPOCHS=10 \
+TEST_FREQ=10 \
+SAVE_FREQ=10 \
+VLLM_KV_CACHE_DTYPE=auto \
+VLLM_ENABLE_PREFIX_CACHING=true \
+TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0 \
+MAX_RESPONSE_LENGTH=24576 \
+MAX_MODEL_LEN=49152 \
+TRAIN_BATCH_SIZE=8 \
+VAL_BATCH_SIZE=8 \
+ROLLOUT_BATCH_SIZE=8 \
+PPO_MINI_BATCH_SIZE=8 \
+MODE=grpo \
+CONTINUE_ON_FAIL=0 \
+CAPACITY_PROFILES="02_auto_prefix_24k_48k" \
+bash scripts/p5_run_vllm_v1_capacity_matrix.sh
+```
+
+`CAPACITY_PROFILES` is intentionally required for readiness gating. Without it,
+the script will run the full matrix and may continue into experimental FP8 or
+larger-context profiles.
+
 The profile order is:
 
 1. `01_auto_no_prefix_24k_48k`
