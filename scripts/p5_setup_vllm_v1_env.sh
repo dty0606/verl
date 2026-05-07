@@ -16,6 +16,7 @@ INSTALL_CUDA_TOOLS="${INSTALL_CUDA_TOOLS:-1}"
 CUDA_TOOLS_CHANNEL="${CUDA_TOOLS_CHANNEL:-nvidia/label/cuda-12.9.1}"
 CUDA_NVCC_TOOLS_VERSION="${CUDA_NVCC_TOOLS_VERSION:-12.9.86}"
 CUDA_NVVM_TOOLS_VERSION="${CUDA_NVVM_TOOLS_VERSION:-12.9.86}"
+CUDA_CUDART_DEV_VERSION="${CUDA_CUDART_DEV_VERSION:-12.9.79}"
 INSTALL_FLASH_ATTN="${INSTALL_FLASH_ATTN:-1}"
 FLASH_ATTN_WHEEL_URL="${FLASH_ATTN_WHEEL_URL:-https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl}"
 TAU2_REPO="${TAU2_REPO:-https://github.com/sierra-research/tau2-bench.git}"
@@ -64,6 +65,7 @@ if [ "$INSTALL_CUDA_TOOLS" = "1" ]; then
         -c "$CUDA_TOOLS_CHANNEL" \
         "cuda-nvcc-tools=$CUDA_NVCC_TOOLS_VERSION" \
         "cuda-nvvm-tools=$CUDA_NVVM_TOOLS_VERSION" \
+        "cuda-cudart-dev=$CUDA_CUDART_DEV_VERSION" \
         --no-update-deps
 fi
 

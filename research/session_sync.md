@@ -606,7 +606,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 
 - Kiro updated `research/p5_environment_issues.md` with the working west-P5 stack: `sdpo-vllm20-v1`, Python 3.12.13, torch 2.11.0+cu129, vLLM 0.20.1 cu129, flash-attn 2.8.3 community wheel, FlashInfer 0.6.8.post1, CUDA/NVVM tools 12.9.86.
 - Codex QA aligned the runnable helpers with that manual flow:
-  - `scripts/p5_setup_vllm_v1_env.sh` now defaults to the vLLM cu129 wheel index fallback, installs CUDA `cuda-nvcc-tools` + `cuda-nvvm-tools`, installs the flash-attn torch2.11/cp312 community wheel, and prints the required CUDA/GDN env exports.
+  - `scripts/p5_setup_vllm_v1_env.sh` now defaults to the vLLM cu129 wheel index fallback, installs CUDA `cuda-nvcc-tools` + `cuda-nvvm-tools` + `cuda-cudart-dev`, installs the flash-attn torch2.11/cp312 community wheel, and prints the required CUDA/GDN env exports.
   - `scripts/p5_run_vllm_v1_capacity_matrix.sh` now defaults `TRAIN_BATCH_SIZE=8`, `ROLLOUT_BATCH_SIZE=8`, `PPO_MINI_BATCH_SIZE=8` for 8-GPU P5 divisibility.
   - `research/p5_vllm_v1_conda_runbook.md` now requires flash-attn import plus `nvcc`/`cicc` visibility before full runs.
 - QA stance: a GDN JIT failure can be tolerated only for a tiny smoke if the profile completes. Do not start overnight GRPO/SDPO until GDN is fixed or the passing profile is explicitly documented as stable enough despite the warning.
@@ -638,6 +638,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - Tau2/Tau3 runtime dependency: `~/tau2-bench`.
 - Keep S3 sync region as `us-west-2` for the existing `s3://tianyd-rlvr-research/tau3-sdpo/latest-verl` bucket, but set `AWS_REGION=us-east-1` / `AWS_DEFAULT_REGION=us-east-1` for Bedrock/Tau3 user-simulator calls on east P5.
 - East readiness gates: vLLM V1 preflight, `vllm._C` import, `flash_attn` import, `nvcc`/`cicc` visibility, 3-step GRPO profile `02_auto_prefix_24k_48k`, then 1-step `MODE=sdpo SDPO_ARM=original` smoke before any overnight vanilla-SDPO baseline.
+- East preflight found `cuda_runtime.h` only under Python `site-packages/nvidia/cuda_runtime/include`, not under `$CONDA_PREFIX/targets/x86_64-linux/include`. Root cause is missing CUDA runtime header package; `cuda-cudart` alone did not install headers. Install `cuda-cudart-dev=12.9.79` from `nvidia/label/cuda-12.9.1`, keep `CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"`, and rerun preflight before GRPO smoke.
 
 ## Evidence Carried Forward
 

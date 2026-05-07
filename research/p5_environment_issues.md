@@ -15,7 +15,7 @@ transformers:       5.8.0
 tokenizers:         0.22.2
 ray:                2.55.1
 CUDA driver:        580.126.09 (supports CUDA 13.0)
-CUDA toolkit:       12.9 (conda cuda-nvcc + cuda-nvvm-tools)
+CUDA toolkit:       12.9 (conda cuda-nvcc-tools + cuda-nvvm-tools + cuda-cudart-dev)
 GPU:                8× NVIDIA H100 80GB HBM3
 VLLM_USE_V1:       1
 ```
@@ -42,6 +42,7 @@ conda install -n sdpo-vllm20-v1 -y \
   -c nvidia/label/cuda-12.9.1 \
   cuda-nvcc-tools=12.9.86 \
   cuda-nvvm-tools=12.9.86 \
+  cuda-cudart-dev=12.9.79 \
   --no-update-deps
 ```
 
@@ -153,11 +154,17 @@ export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 
 **Symptom:** `fatal error: cuda_runtime.h: No such file or directory`
 
-**Root cause:** `CUDA_HOME` points to wrong location. The header is at `$CONDA_PREFIX/targets/x86_64-linux/include/`.
+**Root cause:** `CUDA_HOME` points to the wrong location, or the CUDA runtime
+header package was not installed. `cuda-cudart` is not enough on some SM CE
+conda builds; install `cuda-cudart-dev` so the header lands under the target
+CUDA tree.
 
 **Fix:**
 ```bash
+conda install -n sdpo-vllm20-v1 -y -c nvidia/label/cuda-12.9.1 \
+  cuda-cudart-dev=12.9.79 --no-update-deps
 export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
+ls "$CUDA_HOME/include/cuda_runtime.h"
 ```
 
 ### 5. flash-attn build from source fails (no nvcc / incomplete toolkit)
