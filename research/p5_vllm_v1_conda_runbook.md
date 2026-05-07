@@ -12,7 +12,7 @@ Target stack for this branch:
 - vLLM `0.20.1` with `VLLM_USE_V1=1`
 - Torch installed as the ABI-matched vLLM dependency, not manually upgraded later
 - CUDA wheel backend `cu129`
-- CUDA compiler/NVVM tools `12.9.86`, `cuda-cudart-dev`, and CUDA CRT headers for FlashInfer GDN JIT
+- CUDA compiler/NVVM tools `12.9.86`, NVCC/NVVM dev headers, `cuda-cudart-dev`, and CUDA CRT/dev headers for FlashInfer GDN JIT
 - flash-attn `2.8.3` community wheel for torch `2.11` / Python `3.12`
 - Tau3 live runtime via `tau2-bench` commit `220b47844fb74d4351037e81055cf1e2948e4734`
 
@@ -244,7 +244,7 @@ export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
 export TAU3_LIVE_FEEDBACK_FORMAT=json
 ```
 
-If setup prints `WARN: uv does not expose --torch-backend`, it should fall back to the `https://wheels.vllm.ai/0.20.1/cu129` wheel index. Treat the env as suspect until preflight proves `vllm._C`, Torch CUDA, and the vLLM version. If setup cannot find `cuda_runtime.h`, `crt/host_config.h`, `nvcc`, or `cicc`, fix the CUDA/NVVM env before full runs; FlashInfer/GDN JIT depends on those pieces for Qwen3.5 linear-attention kernels. `cuda-cudart` alone may not install headers on SM CE; install `cuda-cudart-dev=12.9.79` if `cuda_runtime.h` is missing, and install `cuda-crt=12.9.86` if `crt/host_config.h` is missing.
+If setup prints `WARN: uv does not expose --torch-backend`, it should fall back to the `https://wheels.vllm.ai/0.20.1/cu129` wheel index. Treat the env as suspect until preflight proves `vllm._C`, Torch CUDA, and the vLLM version. If setup cannot find `cuda_runtime.h`, `crt/host_config.h`, `fatbinary_section.h`, `nvcc`, or `cicc`, fix the CUDA/NVVM env before full runs; FlashInfer/GDN JIT depends on those pieces for Qwen3.5 linear-attention kernels. `cuda-cudart` alone may not install headers on SM CE; install `cuda-cudart-dev=12.9.79` if `cuda_runtime.h` is missing, `cuda-crt=12.9.86` plus `cuda-crt-dev_linux-64=12.9.86` if `crt/host_config.h` is missing, and `cuda-nvcc-dev_linux-64=12.9.86` plus `cuda-nvvm-dev_linux-64=12.9.86` if `fatbinary_section.h` or other NVCC internal headers are missing.
 
 ## Verify Inputs
 
@@ -277,7 +277,9 @@ python -c "import vllm._C; print('vllm._C OK')"
 python -c "import flash_attn; print('flash_attn', flash_attn.__version__)"
 which nvcc
 which cicc
+test -f "$CUDA_HOME/include/cuda_runtime.h"
 test -f "$CUDA_HOME/include/crt/host_config.h"
+test -f "$CUDA_HOME/include/fatbinary_section.h"
 ```
 
 Required pass signals:
@@ -286,6 +288,7 @@ Required pass signals:
 - `VLLM_USE_V1=1`
 - `VLLM_C_EXTENSION=PASS`
 - `CUDA_RUNTIME_HEADER` is not `<missing>`
+- CUDA compiler internal headers resolve: `crt/host_config.h` and `fatbinary_section.h`
 - `flash_attn` imports
 - `nvcc` and `cicc` resolve from the conda CUDA 12.9 toolchain
 - `TAU3_PARSER=PASS` and numeric XML params remain ints
@@ -398,7 +401,7 @@ Record in `research/session_sync.md`: source revision, env name, vLLM/Torch/CUDA
 ## Stop Conditions
 
 - `vllm._C` import failure or undefined symbol: torch/vLLM ABI mismatch.
-- `CUDA_RUNTIME_HEADER=<missing>`, missing `cicc`, or repeated FlashInfer GDN JIT failure: Qwen3.5 linear-attention inference is not proven for full runs.
+- `CUDA_RUNTIME_HEADER=<missing>`, missing `cicc`, missing `crt/host_config.h` / `fatbinary_section.h`, or repeated FlashInfer GDN JIT failure: Qwen3.5 linear-attention inference is not proven for full runs.
 - `NotImplementedError: The page size of the layer is not divisible by the maximum page size`: Qwen3.5 hybrid-KV incompatibility.
 - `TAU3_PARSER=FAIL`: numeric XML parser regression.
 - Bedrock credential/model-access failure after preflight/engine proof.

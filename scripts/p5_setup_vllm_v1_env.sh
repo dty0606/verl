@@ -16,6 +16,9 @@ INSTALL_CUDA_TOOLS="${INSTALL_CUDA_TOOLS:-1}"
 CUDA_TOOLS_CHANNEL="${CUDA_TOOLS_CHANNEL:-nvidia/label/cuda-12.9.1}"
 CUDA_NVCC_TOOLS_VERSION="${CUDA_NVCC_TOOLS_VERSION:-12.9.86}"
 CUDA_NVVM_TOOLS_VERSION="${CUDA_NVVM_TOOLS_VERSION:-12.9.86}"
+CUDA_NVCC_DEV_VERSION="${CUDA_NVCC_DEV_VERSION:-12.9.86}"
+CUDA_NVVM_DEV_VERSION="${CUDA_NVVM_DEV_VERSION:-12.9.86}"
+CUDA_CRT_DEV_VERSION="${CUDA_CRT_DEV_VERSION:-12.9.86}"
 CUDA_CUDART_DEV_VERSION="${CUDA_CUDART_DEV_VERSION:-12.9.79}"
 CUDA_CRT_VERSION="${CUDA_CRT_VERSION:-12.9.86}"
 INSTALL_FLASH_ATTN="${INSTALL_FLASH_ATTN:-1}"
@@ -66,6 +69,9 @@ if [ "$INSTALL_CUDA_TOOLS" = "1" ]; then
         -c "$CUDA_TOOLS_CHANNEL" \
         "cuda-nvcc-tools=$CUDA_NVCC_TOOLS_VERSION" \
         "cuda-nvvm-tools=$CUDA_NVVM_TOOLS_VERSION" \
+        "cuda-nvcc-dev_linux-64=$CUDA_NVCC_DEV_VERSION" \
+        "cuda-nvvm-dev_linux-64=$CUDA_NVVM_DEV_VERSION" \
+        "cuda-crt-dev_linux-64=$CUDA_CRT_DEV_VERSION" \
         "cuda-cudart-dev=$CUDA_CUDART_DEV_VERSION" \
         "cuda-crt=$CUDA_CRT_VERSION" \
         --no-update-deps
@@ -140,11 +146,16 @@ import os
 from pathlib import Path
 
 cuda_home = Path(os.environ.get("CUDA_HOME", "/usr/local/cuda"))
-header = cuda_home / "include" / "cuda_runtime.h"
+headers = [
+    cuda_home / "include" / "cuda_runtime.h",
+    cuda_home / "include" / "crt" / "host_config.h",
+    cuda_home / "include" / "fatbinary_section.h",
+]
 print(f"CUDA_HOME={cuda_home}")
-print(f"CUDA_RUNTIME_HEADER={header if header.exists() else '<missing>'}")
-if not header.exists():
-    print("WARN: cuda_runtime.h is missing; FlashInfer/GDN JIT may fail until CUDA_HOME points at full CUDA toolkit.")
+for header in headers:
+    print(f"CUDA_HEADER={header if header.exists() else '<missing>'} expected={header}")
+if not all(header.exists() for header in headers):
+    print("WARN: CUDA compiler headers are incomplete; FlashInfer/GDN JIT may fail until CUDA dev packages are installed.")
 PY
 
 echo "Setup complete. Before launching training, run:"

@@ -60,19 +60,32 @@ def check_env(args: argparse.Namespace) -> None:
         _fail("VLLM_USE_V1 must be set to 1 for the vLLM V1 migration smoke.")
 
 
-def check_cuda_header(args: argparse.Namespace) -> None:
+def _find_cuda_header(relative_path: str) -> Path | None:
     candidates: list[Path] = []
     if os.environ.get("CUDA_HOME"):
-        candidates.append(Path(os.environ["CUDA_HOME"]) / "include" / "cuda_runtime.h")
-    candidates.append(Path("/usr/local/cuda/include/cuda_runtime.h"))
-    candidates.append(Path("/usr/local/cuda-12/include/cuda_runtime.h"))
+        candidates.append(Path(os.environ["CUDA_HOME"]) / "include" / relative_path)
+    candidates.append(Path("/usr/local/cuda/include") / relative_path)
+    candidates.append(Path("/usr/local/cuda-12/include") / relative_path)
+    return next((path for path in candidates if path.exists()), None)
 
-    found = next((path for path in candidates if path.exists()), None)
-    _print("CUDA_RUNTIME_HEADER", found if found else "<missing>")
-    if found is None and not args.allow_missing_cuda_header:
+
+def check_cuda_header(args: argparse.Namespace) -> None:
+    required_headers = {
+        "CUDA_RUNTIME_HEADER": "cuda_runtime.h",
+        "CUDA_CRT_HOST_CONFIG_HEADER": "crt/host_config.h",
+        "CUDA_FATBINARY_SECTION_HEADER": "fatbinary_section.h",
+    }
+    missing: list[str] = []
+    for key, relative_path in required_headers.items():
+        found = _find_cuda_header(relative_path)
+        _print(key, found if found else "<missing>")
+        if found is None:
+            missing.append(relative_path)
+
+    if missing and not args.allow_missing_cuda_header:
         _fail(
-            "cuda_runtime.h is missing. FlashInfer/GDN JIT can fail later with "
-            "'fatal error: cuda_runtime.h: No such file or directory'."
+            "CUDA compiler headers are incomplete for FlashInfer/GDN JIT. "
+            f"Missing: {', '.join(missing)}."
         )
 
 

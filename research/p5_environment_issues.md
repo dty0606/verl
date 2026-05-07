@@ -15,7 +15,7 @@ transformers:       5.8.0
 tokenizers:         0.22.2
 ray:                2.55.1
 CUDA driver:        580.126.09 (supports CUDA 13.0)
-CUDA toolkit:       12.9 (conda cuda-nvcc-tools + cuda-nvvm-tools + cuda-cudart-dev + cuda-crt)
+CUDA toolkit:       12.9 (conda cuda-nvcc/nvvm tools + nvcc/nvvm dev + cuda-cudart-dev + cuda-crt/dev)
 GPU:                8× NVIDIA H100 80GB HBM3
 VLLM_USE_V1:       1
 ```
@@ -37,13 +37,17 @@ pip install vllm==0.20.1 --extra-index-url https://wheels.vllm.ai/0.20.1/cu129
 ### Step 2: Install CUDA compiler tools (for FlashInfer GDN kernel JIT)
 
 ```bash
-# Install nvcc + cicc (NVVM compiler needed for FlashInfer GDN kernels)
+# Install nvcc + cicc + CUDA compiler/internal headers for FlashInfer GDN kernels.
+# Plain runtime packages are not enough for JIT compilation on SM CE.
 conda install -n sdpo-vllm20-v1 -y \
   -c nvidia/label/cuda-12.9.1 \
   cuda-nvcc-tools=12.9.86 \
   cuda-nvvm-tools=12.9.86 \
+  cuda-nvcc-dev_linux-64=12.9.86 \
+  cuda-nvvm-dev_linux-64=12.9.86 \
   cuda-cudart-dev=12.9.79 \
   cuda-crt=12.9.86 \
+  cuda-crt-dev_linux-64=12.9.86 \
   --no-update-deps
 ```
 
@@ -179,10 +183,40 @@ problem, not a Qwen/vLLM algorithm issue.
 **Fix:**
 ```bash
 conda install -n sdpo-vllm20-v1 -y -c nvidia/label/cuda-12.9.1 \
-  cuda-crt=12.9.86 --no-update-deps
+  cuda-crt=12.9.86 cuda-crt-dev_linux-64=12.9.86 --no-update-deps
 export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
 ls "$CUDA_HOME/include/crt/host_config.h"
 rm -rf ~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90
+```
+
+### 4c. FlashInfer GDN kernel JIT fails: `fatbinary_section.h: No such file or directory`
+
+**Symptom:** `fatal error: fatbinary_section.h: No such file or directory`
+during `nvcc` compilation of FlashInfer GDN prefill kernels.
+
+**Root cause:** The CUDA runtime and CRT headers are now visible, but the
+target-architecture NVCC development headers are still missing. This is still
+the same FlashInfer/GDN JIT setup family; it is not a new vLLM or Qwen3.5
+algorithm failure.
+
+**Fix:**
+```bash
+conda install -n sdpo-vllm20-v1 -y -c nvidia/label/cuda-12.9.1 \
+  cuda-nvcc-dev_linux-64=12.9.86 \
+  cuda-nvvm-dev_linux-64=12.9.86 \
+  cuda-crt-dev_linux-64=12.9.86 \
+  --no-update-deps
+export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
+ls "$CUDA_HOME/include/fatbinary_section.h"
+rm -rf ~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90
+```
+
+If another CUDA-internal header is missing after this, stop piecemeal fixes and
+install the broader compiler meta-package:
+
+```bash
+conda install -n sdpo-vllm20-v1 -y -c nvidia/label/cuda-12.9.1 \
+  cuda-compiler=12.9.1 --no-update-deps
 ```
 
 ### 5. flash-attn build from source fails (no nvcc / incomplete toolkit)
@@ -251,8 +285,9 @@ The FlashInfer GDN kernel JIT failure for Qwen3.5's linear attention layers can 
 
 To fully fix GDN JIT before full runs:
 1. All CUDA paths must be set (CUDA_HOME, PATH with nvvm/bin, LIBRARY_PATH with libcuda.so)
-2. Clear the failed cache: `rm -rf ~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90`
-3. Rerun — kernels will JIT-compile (~5 min first time, then cached)
+2. The CUDA compiler dev surface must be present: `cuda_runtime.h`, `crt/host_config.h`, `fatbinary_section.h`, `nvcc`, and `cicc`
+3. Clear the failed cache: `rm -rf ~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90`
+4. Rerun — kernels will JIT-compile (~5 min first time, then cached)
 
 ## Platform Constraints (SM CE)
 
