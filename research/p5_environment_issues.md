@@ -1,145 +1,249 @@
-# P5 Environment Issues: Lessons Learned
+# P5 Environment Issues & Working Setup Guide
 
-Date: 2026-05-06
+Date: 2026-05-07 (updated after successful vLLM V1 bringup)
 
-## Summary
+## Working Stack (Proven on West P5, Profile 01 PASS)
 
-Creating new conda environments on SageMaker Code Editor P5 instances for Tau3 SDPO/GRPO training has been repeatedly blocked by dependency conflicts, ABI mismatches, and platform limitations. This document catalogs the issues encountered and the workarounds used.
-
-## Platform Constraints
-
-- **SageMaker Code Editor** runs inside a container, not a full VM. No `systemctl`, no `yum`/`apt`, and no Docker daemon are available in the current SM CE space.
-- **No Docker-in-Docker**: The current SM CE space cannot build or run Docker images. Build Docker images on a separate EC2 instance, CodeBuild/GitHub Actions runner with Docker, or a Docker-enabled SageMaker domain.
-- **99 GB EBS root volume**: The domain root volume is small for training artifacts. It filled during SDPO checkpoint save and caused `basic_ios::clear: iostream error`.
-- **NVMe is ephemeral**: `/mnt/sagemaker-nvme/` has much more space but is lost on instance stop. Sync checkpoints and manifests to S3.
-- **No `nvcc` on us-east-1 P5 SM CE**: FlashInfer GDN kernel JIT can fail with `cuda_runtime.h: No such file or directory`. Use a proven stack/cache or a container/base image with CUDA headers.
-
-## Dependency Conflicts
-
-### tokenizers vs transformers vs huggingface_hub
-
-- `transformers==5.6.2` requires `huggingface-hub>=1.5.0`.
-- `tokenizers==0.22.0` requires `huggingface-hub<1.0`.
-- **Resolution**: Install with `--no-deps`, then manually install the runtime hub version. This violates tokenizers' resolver constraint but has worked at runtime.
-
-### vLLM ABI mismatch with torch
-
-- `vllm==0.19.1` must be matched with the Torch wheel it was compiled against.
-- Loading `vllm==0.19.1` with `torch==2.11.0` caused:
-  ```
-  ImportError: vllm/_C.abi3.so: undefined symbol: _ZN3c1013MessageLoggerC1EPKciib
-  ```
-- **Resolution**: Treat Torch and vLLM as one ABI pair. Verify with `python -c "import vllm, importlib; importlib.import_module('vllm._C')"`.
-
-### vLLM 0.20.x hybrid KV cache page-size error
-
-- Qwen3.5 has mixed attention/linear-attention layers with different KV cache page sizes.
-- vLLM 0.20.x V1 engine failed with:
-  ```
-  NotImplementedError: The page size of the layer is not divisible by the maximum page size. Cannot unify by adjusting block_size.
-  ```
-- **Resolution**: Either use the proven vLLM 0.19.1/V0 stack, or smoke-test vLLM 0.20.x/V1 with explicit `--no-enable-prefix-caching` and the hybrid-KV fallback knobs exposed by the Tau3 launchers. The vLLM 0.20.x path is not proven until P5 engine initialization passes.
-
-### FlashInfer version mismatch
-
-- `flashinfer-python==0.6.8.post1` from the vLLM 0.20.x attempt tried to JIT-compile GDN kernels and failed without CUDA headers.
-- `flashinfer-python==0.6.6` worked in the known-good vLLM 0.19.1 environment with prebuilt kernel cache.
-- **Resolution**: Pin FlashInfer with the vLLM/Torch stack and record whether CUDA headers and kernel caches are present.
-
-### conda `set -u` / unbound variable
-
-- Conda deactivation hooks can reference unset backup variables such as `CONDA_BACKUP_CXX`.
-- **Resolution**: Use `set -eo pipefail` in conda-aware setup/export scripts, or wrap conda activation/deactivation with `set +u`.
-
-## Missing Packages
-
-Fresh environments repeatedly discovered missing transitive packages:
-
-| Package | Why needed | Install method |
-|---------|------------|----------------|
-| `tensordict` | `verl.protocol` imports it | `pip install tensordict==0.10.0` |
-| `multiprocess` | `datasets.arrow_dataset` imports it | `pip install multiprocess` |
-| `xxhash` | `datasets.fingerprint` imports it | `pip install xxhash` |
-| `fastuuid` | `litellm._uuid` imports it | `pip install fastuuid` |
-| `latex2sympy2_extended` | `math_verify` imports it | `pip install latex2sympy2_extended` |
-| `codetiming` | VERL runtime dependency | `pip install codetiming` |
-| `torchdata` | VERL runtime dependency | `pip install torchdata` |
-| `qwen-vl-utils` | Qwen3.5 processor utility | `pip install qwen-vl-utils` |
-| `toml`, `addict`, `deepdiff`, `tenacity` | VERL/Tau3 runtime deps | individual pip installs |
-
-## Known-Good Stack
-
-Proven on west P5 for GRPO and vanilla-peer SDPO:
-
-```text
-torch==2.10.0+cu128
-transformers==5.6.2
-vllm==0.19.1
-flash-attn==2.8.3
-flashinfer-python==0.6.6
-ray==2.53.0
-tokenizers==0.22.0
-huggingface-hub>=1.5.0
-datasets==4.4.2
-tensordict==0.10.0
+```
+Env name:           sdpo-vllm20-v1
+Python:             3.12.13
+torch:              2.11.0+cu129
+vLLM:               0.20.1 (cu129 wheel from wheels.vllm.ai)
+flash-attn:         2.8.3 (community wheel for torch 2.11 + cu12)
+flashinfer-python:  0.6.8.post1
+transformers:       5.8.0
+tokenizers:         0.22.2
+ray:                2.55.1
+CUDA driver:        580.126.09 (supports CUDA 13.0)
+CUDA toolkit:       12.9 (conda cuda-nvcc + cuda-nvvm-tools)
+GPU:                8× NVIDIA H100 80GB HBM3
+VLLM_USE_V1:       1
 ```
 
-This stack ran on 8xH100 with the Qwen3.5-4B VLM checkpoint.
+## Correct Setup Flow (Reproducible)
 
-## Workarounds Used
-
-1. **Reuse existing env**: Instead of creating fresh envs, use `pip install -e <repo> --no-deps` inside the proven `sdpo-qwen35` env.
-2. **Copy FlashInfer cache**: Sync prebuilt kernel cache between P5 instances via S3 when needed.
-3. **Symlink libcudart**: Use `ln -sf /usr/local/cuda/lib64/libcudart.so /opt/conda/lib64/` only when a linker path issue is confirmed.
-4. **Pin tokenizers separately**: Install `tokenizers==0.22.0 --no-deps` after the rest of the environment.
-5. **NVMe workspace**: Symlink `~/verl_tau3_sdpo -> /mnt/sagemaker-nvme/verl_workspace/verl_tau3_sdpo` for disk-heavy work.
-6. **S3 checkpoint sync**: Sync checkpoints/manifests to S3 frequently enough to survive instance stops.
-
-## Local Corporate Laptop Probe
-
-The Windows laptop with RTX 3080 is useful for lightweight validation only:
-
-- `nvidia-smi` sees the RTX 3080 and driver CUDA capability.
-- No Docker, no WSL, no conda, and no `nvcc` are currently available.
-- Native Windows is not a faithful vLLM/PyTorch/FlashInfer target; official vLLM GPU support is Linux-first, with Windows users expected to use WSL for real GPU execution.
-- A native Windows dry run for `vllm==0.20.0` found no matching binary wheel, so local vLLM20 validation requires WSL/Docker/Linux rather than this bare Windows Python.
-
-Use the laptop for:
-
-- Python syntax and JSON probe scripts.
-- Git/S3 handoff sanity checks.
-- Static launcher/config review.
-- Read-only runtime probes via `scripts/probe_runtime_surface.py`.
-
-Do not treat the laptop as proof for:
-
-- H100/Hopper kernels.
-- NCCL/Ray tensor-parallel behavior.
-- FlashInfer GDN JIT/cache behavior.
-- 8-GPU memory and 32K-context Tau3 training.
-
-## New Reproducibility Helpers
-
-- `scripts/probe_runtime_surface.py`: read-only JSON probe for local/P5 runtime surface, including platform, Python, disk, `nvidia-smi`, `nvcc`, Docker, WSL, package imports, `vllm._C`, Torch CUDA, and `cuda_runtime.h` candidates.
-- `scripts/p5_export_frozen_env.sh`: no-Docker/no-Git frozen environment exporter for the active P5 conda env. It records `pip freeze`, `conda list` when available, runtime import versions, `vllm._C`, CUDA headers, `nvidia-smi`, and `SOURCE_REVISION`/Git metadata when available.
-
-Recommended P5 capture after a successful smoke:
+### Step 1: Create conda env and install vLLM from cu129 wheel index
 
 ```bash
-cd ~/verl_tau3_sdpo
-SOURCE_REVISION=<github_commit_short_sha> \
-  bash scripts/p5_export_frozen_env.sh outputs/frozen_env/<run_name>
+conda create -y -n sdpo-vllm20-v1 python=3.12
+source activate sdpo-vllm20-v1
+python -m pip install --upgrade pip uv
 
-python scripts/probe_runtime_surface.py \
-  --indent 2 \
-  > outputs/frozen_env/<run_name>/runtime_surface.json
+# CRITICAL: Install vLLM from their cu129 wheel index, NOT PyPI default.
+# PyPI default gives a CUDA 13 wheel that won't work on CUDA 12.x systems.
+pip install vllm==0.20.1 --extra-index-url https://wheels.vllm.ai/0.20.1/cu129
 ```
 
-## Recommendation for Future Runs
+### Step 2: Install CUDA compiler tools (for FlashInfer GDN kernel JIT)
 
-1. **Do not create new conda envs on SM CE** unless absolutely necessary. Reuse the proven `sdpo-qwen35` env.
-2. **Build Docker images outside SM CE** for reproducibility. The current SM CE space cannot run Docker.
-3. **For paper publication**: Provide `docker/Dockerfile.tau3.vllm20.v1` plus frozen environment manifests from a successful run. Do not rely on reviewers reproducing the ad hoc conda setup.
-4. **If a new env is unavoidable**: Install Torch/vLLM as an ABI-matched pair first, then install local VERL/Tau3 with `--no-deps`. Never let pip freely resolve the full dependency tree.
-5. **Always verify**: `python -c "import vllm, importlib; importlib.import_module('vllm._C')"` before launching training.
-6. **For paper-style SDPO today**: prefer latest-VERL `SDPO_ARM=original` over old-repo `SDPO-paper-original` unless the goal is specifically a historical-code ablation. The latest-VERL path has parser fixes, pass^k validation aliases, and current Tau3 runtime guards.
+```bash
+# Install nvcc + cicc (NVVM compiler needed for FlashInfer GDN kernels)
+conda install -n sdpo-vllm20-v1 -y \
+  -c nvidia/label/cuda-12.9.1 \
+  cuda-nvcc-tools=12.9.86 \
+  cuda-nvvm-tools=12.9.86 \
+  --no-update-deps
+```
+
+### Step 3: Install flash-attn (community wheel for torch 2.11)
+
+```bash
+# No prebuilt official wheel exists for torch 2.11+cu129.
+# Use the community wheel from lesj0610 (same source as old env):
+pip install --no-deps \
+  "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+```
+
+### Step 4: Install VERL/Tau3 runtime dependencies
+
+```bash
+pip install \
+    accelerate addict boto3 codetiming datasets deepdiff dill fastuuid \
+    "gymnasium>=1.2.2" hydra-core latex2sympy2_extended \
+    "litellm>=1.80.15,<1.82.7" mathruler multiprocess "numpy<2.0.0" \
+    pandas peft "pyarrow>=19.0.0" pybind11 pylatexenc qwen-vl-utils \
+    "ray[default]>=2.41.0" tenacity tensorboard \
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0" toml torchdata wandb xxhash
+
+# Install VERL repo as editable (no deps to avoid torch/vllm drift)
+cd ~/verl_tau3_sdpo_vllm20
+pip install -e . --no-deps
+
+# Install tau2-bench
+pip install -e ~/tau2-bench --no-deps
+```
+
+### Step 5: Set environment variables before every run
+
+```bash
+source activate sdpo-vllm20-v1
+
+# CUDA paths (critical for FlashInfer GDN JIT)
+export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
+export PATH="$CONDA_PREFIX/bin:$CONDA_PREFIX/nvvm/bin:$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/lib64:$CUDA_HOME/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LIBRARY_PATH:-}"
+
+# Stable temp dir (FlashInfer JIT writes large intermediate files)
+mkdir -p "$HOME/tmp"
+export TMPDIR="$HOME/tmp"
+
+# vLLM V1 mode
+export VLLM_USE_V1=1
+
+# Tau3 runtime
+export TAU2_DATA_DIR=~/tau2-bench/data
+export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
+export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
+export TAU3_LIVE_RUNTIME=official_gym
+```
+
+### Step 6: Verify
+
+```bash
+python -c "import vllm._C; print('vllm._C OK')"
+python -c "import flash_attn; print('flash_attn', flash_attn.__version__)"
+python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+which nvcc
+which cicc
+python scripts/p5_preflight_vllm_v1.py --model-path "$MODEL_PATH" --dataset-dir "$TASK_PATH"
+```
+
+## Issues Encountered & Resolutions
+
+### 1. vLLM 0.20.1 PyPI wheel requires CUDA 13 (`libcudart.so.13`)
+
+**Symptom:** `ImportError: libcudart.so.13: cannot open shared object file`
+
+**Root cause:** The default PyPI wheel for vLLM 0.20.1 is compiled against CUDA 13. SM CE P5 has CUDA 12.x runtime.
+
+**Fix:** Install from vLLM's cu129 wheel index:
+```bash
+pip install vllm==0.20.1 --extra-index-url https://wheels.vllm.ai/0.20.1/cu129 --no-deps
+```
+
+**Source:** [vLLM forum thread](https://discuss.vllm.ai/t/install-using-torch-backend-cu129-but-try-to-import-cu13/2601)
+
+### 2. FlashInfer GDN kernel JIT fails: `cicc: not found`
+
+**Symptom:** `sh: 1: cicc: not found` during GDN prefill kernel warmup
+
+**Root cause:** conda `cuda-nvcc` package doesn't include `cicc` (NVVM intermediate compiler). Need `cuda-nvvm-tools`.
+
+**Fix:**
+```bash
+conda install -n sdpo-vllm20-v1 -y -c nvidia/label/cuda-12.9.1 \
+  cuda-nvcc-tools=12.9.86 cuda-nvvm-tools=12.9.86 --no-update-deps
+export PATH="$CONDA_PREFIX/nvvm/bin:$PATH"
+```
+
+### 3. FlashInfer GDN kernel JIT fails: `cannot find -lcuda`
+
+**Symptom:** `ld: cannot find -lcuda: No such file or directory`
+
+**Root cause:** The linker can't find `libcuda.so` (CUDA driver stub). It's at `/usr/lib/x86_64-linux-gnu/` but not on the linker search path.
+
+**Fix:**
+```bash
+export LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+```
+
+### 4. FlashInfer GDN kernel JIT fails: `cuda_runtime.h: No such file or directory`
+
+**Symptom:** `fatal error: cuda_runtime.h: No such file or directory`
+
+**Root cause:** `CUDA_HOME` points to wrong location. The header is at `$CONDA_PREFIX/targets/x86_64-linux/include/`.
+
+**Fix:**
+```bash
+export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
+```
+
+### 5. flash-attn build from source fails (no nvcc / incomplete toolkit)
+
+**Symptom:** `pip install flash-attn` fails with ninja build errors
+
+**Root cause:** SM CE doesn't have a full CUDA toolkit pre-installed. Even after installing conda nvcc, the flash-attn build may fail due to missing headers or 404 on prebuilt wheel download.
+
+**Fix:** Use the community prebuilt wheel:
+```bash
+pip install --no-deps \
+  "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+```
+
+### 6. vLLM 0.20.x hybrid KV page-size error (RESOLVED by disabling prefix caching)
+
+**Symptom:** `NotImplementedError: The page size of the layer is not divisible by the maximum page size`
+
+**Root cause:** Qwen3.5 has mixed attention/linear-attention layers with different KV cache page sizes. vLLM V1's prefix caching tries to unify them.
+
+**Fix:** Disable prefix caching:
+```bash
+export VLLM_ENABLE_PREFIX_CACHING=false
+```
+
+**Status:** Profile 01 (auto KV, no prefix caching) PASSED. Profile 02 (with prefix caching) is being tested.
+
+### 7. FlashAttention2 not installed (FSDP actor model loading)
+
+**Symptom:** `ImportError: FlashAttention2 has been toggled on, but it cannot be used`
+
+**Root cause:** The model checkpoint config has `_attn_implementation: flash_attention_2` but flash-attn wasn't installed yet.
+
+**Fix:** Install flash-attn (see #5 above).
+
+### 8. Batch size validation error
+
+**Symptom:** `real_train_batch_size (4) must be divisible by minimal possible batch size (8)`
+
+**Root cause:** Capacity matrix defaults used `TRAIN_BATCH_SIZE=2`, `ROLLOUT_BATCH_SIZE=2`, giving `real_train_batch_size = 2*2 = 4` which isn't divisible by 8 GPUs.
+
+**Fix:** Use `TRAIN_BATCH_SIZE=8 ROLLOUT_BATCH_SIZE=8 PPO_MINI_BATCH_SIZE=8`.
+
+### 9. tokenizers/huggingface_hub resolver conflict
+
+**Symptom:** pip resolver fails with conflicting huggingface-hub version requirements
+
+**Fix:** Install transformers and tokenizers with `--no-deps`, then install huggingface_hub separately:
+```bash
+pip install transformers==5.6.2 --no-deps
+pip install tokenizers==0.22.0 --no-deps
+pip install "huggingface_hub>=1.5.0" --no-deps
+```
+
+### 10. No Docker on SM CE
+
+**Symptom:** `docker: command not found`, no `systemctl`, no `yum`/`apt`
+
+**Root cause:** SageMaker Code Editor runs inside a container. No Docker-in-Docker.
+
+**Status:** Use conda env path for now. Docker/ECR for reproducibility later on EC2/CodeBuild.
+
+## GDN Kernel JIT: Warning vs Fatal
+
+The FlashInfer GDN kernel JIT failure for Qwen3.5's linear attention layers is a **WARNING, not fatal**. vLLM falls back to a non-optimized path. Training completes successfully despite the warning. The "First inference may OOM due to autotuner" message means memory usage may be slightly higher than optimal.
+
+To fully fix GDN JIT (optional, for performance):
+1. All CUDA paths must be set (CUDA_HOME, PATH with nvvm/bin, LIBRARY_PATH with libcuda.so)
+2. Clear the failed cache: `rm -rf ~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90`
+3. Rerun — kernels will JIT-compile (~5 min first time, then cached)
+
+## Platform Constraints (SM CE)
+
+- Container-based: no `systemctl`, no `yum`/`apt`, no Docker daemon
+- 99 GB EBS root (cannot resize after domain creation)
+- NVMe is ephemeral (28 TB `/mnt/sagemaker-nvme/`, lost on stop)
+- No root access for system-level CUDA installs
+- Use `source activate <env>` not `conda activate <env>`
+- conda deactivation hooks may fail with `set -u` (unbound CONDA_BACKUP_CXX)
+
+## Capacity Matrix Results (West P5, 2026-05-07)
+
+| Profile | KV dtype | Prefix cache | Response/Model len | Status |
+|---------|----------|-------------|-------------------|--------|
+| 01_auto_no_prefix_24k_48k | auto | off | 24K/48K | **PASS** ✅ |
+| 02_auto_prefix_24k_48k | auto | on | 24K/48K | running... |
+| 03_fp8_no_prefix_24k_48k | fp8 | off | 24K/48K | pending |
+| 04_fp8_prefix_24k_48k | fp8 | on | 24K/48K | pending |
+| 05_fp8_prefix_32k_64k | fp8 | on | 32K/64K | pending |
