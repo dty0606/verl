@@ -199,7 +199,7 @@ export VLLM_ENABLE_PREFIX_CACHING=false
 
 **Root cause:** Capacity matrix defaults used `TRAIN_BATCH_SIZE=2`, `ROLLOUT_BATCH_SIZE=2`, giving `real_train_batch_size = 2*2 = 4` which isn't divisible by 8 GPUs.
 
-**Fix:** Use `TRAIN_BATCH_SIZE=8 ROLLOUT_BATCH_SIZE=8 PPO_MINI_BATCH_SIZE=8`.
+**Fix:** Use `TRAIN_BATCH_SIZE=8 ROLLOUT_BATCH_SIZE=8 PPO_MINI_BATCH_SIZE=8`. The capacity-matrix script now defaults to these 8-GPU-safe values.
 
 ### 9. tokenizers/huggingface_hub resolver conflict
 
@@ -220,11 +220,11 @@ pip install "huggingface_hub>=1.5.0" --no-deps
 
 **Status:** Use conda env path for now. Docker/ECR for reproducibility later on EC2/CodeBuild.
 
-## GDN Kernel JIT: Warning vs Fatal
+## GDN Kernel JIT: Smoke Warning vs Overnight Gate
 
-The FlashInfer GDN kernel JIT failure for Qwen3.5's linear attention layers is a **WARNING, not fatal**. vLLM falls back to a non-optimized path. Training completes successfully despite the warning. The "First inference may OOM due to autotuner" message means memory usage may be slightly higher than optimal.
+The FlashInfer GDN kernel JIT failure for Qwen3.5's linear attention layers can appear as a **warning** and a tiny smoke may continue, but do not treat the env as fully proven for overnight runs while it is still failing. Qwen3.5 depends on these linear-attention/GDN paths during vLLM inference; failed warmup can cause slower first inference, higher memory use, or OOM during autotuning.
 
-To fully fix GDN JIT (optional, for performance):
+To fully fix GDN JIT before full runs:
 1. All CUDA paths must be set (CUDA_HOME, PATH with nvvm/bin, LIBRARY_PATH with libcuda.so)
 2. Clear the failed cache: `rm -rf ~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90`
 3. Rerun — kernels will JIT-compile (~5 min first time, then cached)

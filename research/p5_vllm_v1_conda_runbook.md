@@ -1,6 +1,6 @@
 # P5 vLLM V1 Conda Runbook
 
-Date: 2026-05-06
+Date: 2026-05-07
 
 ## Purpose
 
@@ -12,6 +12,8 @@ Target stack for this branch:
 - vLLM `0.20.1` with `VLLM_USE_V1=1`
 - Torch installed as the ABI-matched vLLM dependency, not manually upgraded later
 - CUDA wheel backend `cu129`
+- CUDA compiler/NVVM tools `12.9.86` for FlashInfer GDN JIT
+- flash-attn `2.8.3` community wheel for torch `2.11` / Python `3.12`
 - Tau3 live runtime via `tau2-bench` commit `220b47844fb74d4351037e81055cf1e2948e4734`
 
 References checked on 2026-05-06: vLLM marks `v0.20.1` as the latest GitHub release, and vLLM GPU install docs recommend `uv pip install ... --torch-backend=auto` / matching vLLM image versions.
@@ -68,18 +70,26 @@ cd ~/verl_tau3_sdpo
 ENV_NAME=sdpo-vllm20-v1 \
 VLLM_VERSION=0.20.1 \
 TORCH_BACKEND=cu129 \
+INSTALL_CUDA_TOOLS=1 \
+INSTALL_FLASH_ATTN=1 \
 TAU2_DIR=~/tau2-bench \
 bash scripts/p5_setup_vllm_v1_env.sh
 
-conda activate sdpo-vllm20-v1
+source activate sdpo-vllm20-v1
 export VLLM_USE_V1=1
+export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
+export PATH="$CONDA_PREFIX/bin:$CONDA_PREFIX/nvvm/bin:$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/lib64:$CUDA_HOME/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LIBRARY_PATH:-}"
+mkdir -p "$HOME/tmp"
+export TMPDIR="$HOME/tmp"
 export TAU2_DATA_DIR=~/tau2-bench/data
 export TAU3_LIVE_RUNTIME=official_gym
 export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
 export TAU3_LIVE_FEEDBACK_FORMAT=json
 ```
 
-If setup prints `WARN: uv does not expose --torch-backend`, treat the env as suspect until preflight proves `vllm._C`, Torch CUDA, and the vLLM version. If setup cannot find `cuda_runtime.h`, set `CUDA_HOME` to a full CUDA toolkit before continuing; FlashInfer/GDN JIT can fail without it.
+If setup prints `WARN: uv does not expose --torch-backend`, it should fall back to the `https://wheels.vllm.ai/0.20.1/cu129` wheel index. Treat the env as suspect until preflight proves `vllm._C`, Torch CUDA, and the vLLM version. If setup cannot find `cuda_runtime.h`, `nvcc`, or `cicc`, fix the CUDA/NVVM env before full runs; FlashInfer/GDN JIT depends on those pieces for Qwen3.5 linear-attention kernels.
 
 ## Verify Inputs
 
@@ -107,6 +117,11 @@ python scripts/p5_preflight_vllm_v1.py \
   --model-path "$MODEL_PATH" \
   --dataset-dir "$PWD/$TASK_PATH" \
   2>&1 | tee logs/vllm_v1_preflight_$(date +%Y%m%d_%H%M%S).log
+
+python -c "import vllm._C; print('vllm._C OK')"
+python -c "import flash_attn; print('flash_attn', flash_attn.__version__)"
+which nvcc
+which cicc
 ```
 
 Required pass signals:
@@ -115,6 +130,8 @@ Required pass signals:
 - `VLLM_USE_V1=1`
 - `VLLM_C_EXTENSION=PASS`
 - `CUDA_RUNTIME_HEADER` is not `<missing>`
+- `flash_attn` imports
+- `nvcc` and `cicc` resolve from the conda CUDA 12.9 toolchain
 - `TAU3_PARSER=PASS` and numeric XML params remain ints
 - Torch/vLLM/FlashInfer/Transformers versions print coherently
 - `train.parquet`, `test.parquet`, and model config exist
@@ -143,6 +160,8 @@ The profile order is:
 3. `03_fp8_no_prefix_24k_48k`
 4. `04_fp8_prefix_24k_48k`
 5. `05_fp8_prefix_32k_64k`
+
+The capacity matrix defaults to `TRAIN_BATCH_SIZE=8`, `ROLLOUT_BATCH_SIZE=8`, and `PPO_MINI_BATCH_SIZE=8` so the real train batch is divisible by 8 P5 GPUs. Do not lower those values on 8-GPU P5 unless you also change the GPU count/config coherently.
 
 The environment is ready for overnight experiments only after at least one GRPO smoke completes 2-3 training steps without ABI errors, FlashInfer/GDN CUDA-header errors, hybrid-KV page-size errors, parser/tool-call regressions, Bedrock access failures, or disk-pressure checkpoint errors.
 
@@ -195,7 +214,7 @@ Record in `research/session_sync.md`: source revision, env name, vLLM/Torch/CUDA
 ## Stop Conditions
 
 - `vllm._C` import failure or undefined symbol: torch/vLLM ABI mismatch.
-- `CUDA_RUNTIME_HEADER=<missing>`: FlashInfer/GDN JIT risk.
+- `CUDA_RUNTIME_HEADER=<missing>`, missing `cicc`, or repeated FlashInfer GDN JIT failure: Qwen3.5 linear-attention inference is not proven for full runs.
 - `NotImplementedError: The page size of the layer is not divisible by the maximum page size`: Qwen3.5 hybrid-KV incompatibility.
 - `TAU3_PARSER=FAIL`: numeric XML parser regression.
 - Bedrock credential/model-access failure after preflight/engine proof.

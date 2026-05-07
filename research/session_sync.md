@@ -602,6 +602,15 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Hardened `scripts/p5_setup_vllm_v1_env.sh` so the conda path now installs Tau3 live runtime deps and installs `tau2-bench` from an existing S3-synced directory or Git when available.
 - Important gating rule for Kiro/P5: `scripts/p5_preflight_vllm_v1.py` is necessary but not sufficient. A 2-3 step GRPO capacity smoke is the first true proof that the vLLM V1 engine works for Qwen3.5 on P5.
 
+### 2026-05-07 vLLM V1 setup QA after west-P5 success
+
+- Kiro updated `research/p5_environment_issues.md` with the working west-P5 stack: `sdpo-vllm20-v1`, Python 3.12.13, torch 2.11.0+cu129, vLLM 0.20.1 cu129, flash-attn 2.8.3 community wheel, FlashInfer 0.6.8.post1, CUDA/NVVM tools 12.9.86.
+- Codex QA aligned the runnable helpers with that manual flow:
+  - `scripts/p5_setup_vllm_v1_env.sh` now defaults to the vLLM cu129 wheel index fallback, installs CUDA `cuda-nvcc-tools` + `cuda-nvvm-tools`, installs the flash-attn torch2.11/cp312 community wheel, and prints the required CUDA/GDN env exports.
+  - `scripts/p5_run_vllm_v1_capacity_matrix.sh` now defaults `TRAIN_BATCH_SIZE=8`, `ROLLOUT_BATCH_SIZE=8`, `PPO_MINI_BATCH_SIZE=8` for 8-GPU P5 divisibility.
+  - `research/p5_vllm_v1_conda_runbook.md` now requires flash-attn import plus `nvcc`/`cicc` visibility before full runs.
+- QA stance: a GDN JIT failure can be tolerated only for a tiny smoke if the profile completes. Do not start overnight GRPO/SDPO until GDN is fixed or the passing profile is explicitly documented as stable enough despite the warning.
+
 ## Evidence Carried Forward
 
 From the old repo:
