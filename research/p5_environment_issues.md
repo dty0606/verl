@@ -2,7 +2,7 @@
 
 Date: 2026-05-07 (updated after successful vLLM V1 bringup)
 
-## Working Stack (Proven on West P5, Profile 01 PASS)
+## Working Stack (Proven on West P5, Profiles 01/02 PASS)
 
 ```
 Env name:           sdpo-vllm20-v1
@@ -257,7 +257,7 @@ The capacity matrix now defaults FP8 profiles to `calculate_kv_scales=false`. Dy
 | Profile | KV dtype | Prefix cache | Response/Model len | Status |
 |---------|----------|-------------|-------------------|--------|
 | 01_auto_no_prefix_24k_48k | auto | off | 24K/48K | **PASS** ✅ |
-| 02_auto_prefix_24k_48k | auto | on | 24K/48K | running... |
+| 02_auto_prefix_24k_48k | auto | on | 24K/48K | **PASS** ✅ |
 | 03_fp8_no_prefix_calcscales_24k_48k | fp8 | off | 24K/48K | FAIL (`init_fp8_kv_scales` list cache bug) |
 | 03_fp8_no_prefix_noscales_24k_48k | fp8 | off | 24K/48K | needs test |
 | 04_fp8_prefix_noscales_24k_48k | fp8 | on | 24K/48K | needs test |

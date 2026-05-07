@@ -629,6 +629,16 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Added `scripts/tau3/bundle_grpo_readiness_from_p5.sh` and `scripts/tau3/analyze_grpo_smoke_bundle.py` so the passing 10-step smoke can be packaged from P5 with logs, rollout JSONLs, W&B metadata, runtime snapshot, and transcript/repetition heuristics. The bundler now prefers `BUNDLE_NAME`; `SMOKE_NAME` remains only as a legacy alias.
 - `scripts/p5_run_vllm_v1_capacity_matrix.sh` now supports `RUN_NAME_PREFIX` and `ROLLOUT_OUTPUT_ROOT`; use these for 300-step runs so full-run W&B names and rollout JSONLs do not mix with the 10-step capacity-smoke artifacts.
 
+### 2026-05-07 east-P5 vLLM V1 bootstrap
+
+- Added an `East P5 Fresh Bootstrap` section to `research/p5_vllm_v1_conda_runbook.md`.
+- Recommended layout for the new us-east-1 P5:
+  - Code snapshot: `~/verl_tau3_sdpo_vllm20`.
+  - Large artifacts/checkpoints: `~/verl_tau3_sdpo/checkpoints`.
+  - Tau2/Tau3 runtime dependency: `~/tau2-bench`.
+- Keep S3 sync region as `us-west-2` for the existing `s3://tianyd-rlvr-research/tau3-sdpo/latest-verl` bucket, but set `AWS_REGION=us-east-1` / `AWS_DEFAULT_REGION=us-east-1` for Bedrock/Tau3 user-simulator calls on east P5.
+- East readiness gates: vLLM V1 preflight, `vllm._C` import, `flash_attn` import, `nvcc`/`cicc` visibility, 3-step GRPO profile `02_auto_prefix_24k_48k`, then 1-step `MODE=sdpo SDPO_ARM=original` smoke before any overnight vanilla-SDPO baseline.
+
 ## Evidence Carried Forward
 
 From the old repo:
