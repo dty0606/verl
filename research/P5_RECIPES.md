@@ -904,7 +904,18 @@ Stop criteria:
 - vLLM throws hybrid-KV page-size, FP8 scale, ABI, or CUDA/GDN errors.
 
 If this passes, the next longer GRPO run should keep the same profile and only
-change `TOTAL_TRAINING_STEPS`, `TEST_FREQ`, `SAVE_FREQ`, and the run name.
+change `TOTAL_TRAINING_STEPS`, `TEST_FREQ`, `SAVE_FREQ`, and the run/output
+names. For non-smoke runs, set `RUN_NAME_PREFIX` and `ROLLOUT_OUTPUT_ROOT` so
+the full-run W&B name and rollout JSONLs do not mix with the capacity-smoke
+artifacts:
+
+```bash
+export RUN_NAME_PREFIX=grpo_vllm_v1_clean_300
+export ROLLOUT_OUTPUT_ROOT="$PWD/outputs/grpo_vllm_v1_clean_300"
+```
+
+The selected profile will then write rollout JSONLs under
+`outputs/grpo_vllm_v1_clean_300/02_auto_prefix_24k_48k/rollout_data`.
 
 After a passing smoke, bundle the evidence for Codex/Pro review:
 

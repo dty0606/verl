@@ -20,6 +20,8 @@ MODEL_PATH="${MODEL_PATH:-}"
 MODE="${MODE:-grpo}" # grpo or sdpo
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-1}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_ROOT/logs/vllm_v1_capacity_matrix/$(date +%Y%m%d_%H%M%S)}"
+ROLLOUT_OUTPUT_ROOT="${ROLLOUT_OUTPUT_ROOT:-$PROJECT_ROOT/outputs/vllm_v1_capacity_matrix}"
+RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-vllm_v1}"
 RUN_EXPERIMENTAL_FP8_SCALES="${RUN_EXPERIMENTAL_FP8_SCALES:-0}"
 CAPACITY_PROFILES="${CAPACITY_PROFILES:-all}"
 PROFILE_RUN_COUNT=0
@@ -74,6 +76,8 @@ echo "Task dir: $TASK_DIR"
 echo "Model path: $MODEL_PATH"
 echo "Mode: $MODE"
 echo "Log root: $LOG_ROOT"
+echo "Rollout output root: $ROLLOUT_OUTPUT_ROOT"
+echo "Run name prefix: $RUN_NAME_PREFIX"
 echo "Capacity profiles: $CAPACITY_PROFILES"
 echo "VLLM_USE_V1: $VLLM_USE_V1"
 echo "Tau3 all-messages observation: $TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION"
@@ -109,13 +113,13 @@ run_profile() {
         export VLLM_ENABLE_PREFIX_CACHING="$prefix"
         export VLLM_KV_CACHE_DTYPE="$kv_dtype"
         export VLLM_CALCULATE_KV_SCALES="$calc_scales"
-        export ROLLOUT_DATA_DIR="$PROJECT_ROOT/outputs/vllm_v1_capacity_matrix/$name/rollout_data"
+        export ROLLOUT_DATA_DIR="$ROLLOUT_OUTPUT_ROOT/$name/rollout_data"
         mkdir -p "$ROLLOUT_DATA_DIR"
         if [ "$MODE" = "grpo" ]; then
-            bash "$PROJECT_ROOT/run_local_tau3_grpo_live_p5.sh" "$TASK_PATH" "vllm_v1_${name}" json
+            bash "$PROJECT_ROOT/run_local_tau3_grpo_live_p5.sh" "$TASK_PATH" "${RUN_NAME_PREFIX}_${name}" json
         else
             SDPO_ARM="${SDPO_ARM:-original}" \
-                bash "$PROJECT_ROOT/run_local_tau3_sdpo_live_p5.sh" "$TASK_PATH" "vllm_v1_${name}" json
+                bash "$PROJECT_ROOT/run_local_tau3_sdpo_live_p5.sh" "$TASK_PATH" "${RUN_NAME_PREFIX}_${name}" json
         fi
     ) 2>&1 | tee "$LOG_ROOT/${name}.log"
 }

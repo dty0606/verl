@@ -94,6 +94,9 @@ def transcript_marker_count(text: str) -> int:
 
 def analyze_rollouts(bundle_dir: Path) -> dict[str, Any]:
     rollout_dir = bundle_dir / "rollout_data"
+    if not rollout_dir.exists():
+        candidates = sorted(bundle_dir.rglob("rollout_data"))
+        rollout_dir = candidates[0] if candidates else rollout_dir
     files = sorted(rollout_dir.glob("*.jsonl"), key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem)
     samples: list[dict[str, Any]] = []
     for path in files:
@@ -208,19 +211,23 @@ def main() -> None:
     args = parser.parse_args()
 
     bundle_dir = args.bundle_dir
-    log_text = "\n".join(
-        read_text(path)
-        for path in [
-            bundle_dir / "full_log.txt",
-            bundle_dir / "metrics_summary.txt",
-            bundle_dir / "capacity_matrix" / "summary.txt",
-            bundle_dir / "capacity_matrix" / "00_preflight.log",
-            bundle_dir / "capacity_matrix" / "02_auto_prefix_24k_48k.log",
-        ]
-    )
+    explicit_logs = [
+        bundle_dir / "full_log.txt",
+        bundle_dir / "metrics_summary.txt",
+        bundle_dir / "capacity_matrix" / "summary.txt",
+        bundle_dir / "capacity_matrix" / "00_preflight.log",
+        bundle_dir / "capacity_matrix" / "02_auto_prefix_24k_48k.log",
+    ]
+    discovered_logs = sorted(bundle_dir.rglob("*.log")) + sorted(bundle_dir.rglob("summary.txt"))
+    log_paths = []
+    for path in explicit_logs + discovered_logs:
+        if path.exists() and path not in log_paths:
+            log_paths.append(path)
+    log_text = "\n".join(read_text(path) for path in log_paths)
     metrics = extract_metric_values(log_text)
     summary = {
         "bundle_dir": str(bundle_dir),
+        "log_files": [str(path.relative_to(bundle_dir)) for path in log_paths],
         "metric_summary": summarize_metrics(metrics),
         "rollout_summary": analyze_rollouts(bundle_dir),
         "log_text": log_text,
