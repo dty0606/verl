@@ -11,6 +11,8 @@ from typing import Any
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 _THINK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
+_OPEN_THINK_RE = re.compile(r"<think>.*$", flags=re.DOTALL | re.IGNORECASE)
+_CLOSE_THINK_RE = re.compile(r"</think>", flags=re.IGNORECASE)
 _STOPWORDS = {
     "a",
     "an",
@@ -52,7 +54,10 @@ class Tau3MemoryCard:
 
 
 def strip_thinking(text: str) -> str:
-    return " ".join(_THINK_RE.sub(" ", str(text or "")).split())
+    text = _THINK_RE.sub(" ", str(text or ""))
+    text = _OPEN_THINK_RE.sub(" ", text)
+    text = _CLOSE_THINK_RE.sub(" ", text)
+    return " ".join(text.split())
 
 
 def _tokens(text: str) -> set[str]:
@@ -128,6 +133,8 @@ class Tau3MemoryBank:
         mode = str(mode or "relevant").lower()
         if mode in {"random", "shuffle", "shuffled"}:
             return candidates[_stable_index(rng_key or query_text, len(candidates))]
+        if mode not in {"relevant", "lexical"}:
+            raise ValueError(f"Unsupported Tau3 memory retrieval mode: {mode}")
 
         query_tokens = _tokens(query_text)
         if not query_tokens:
@@ -216,10 +223,15 @@ def load_memory_bank(path: str, *, max_card_chars: int = 2200) -> Tau3MemoryBank
     return Tau3MemoryBank(cards)
 
 
-def render_memory_section(card: Tau3MemoryCard, *, template: str | None = None) -> str:
+def render_memory_section(
+    card: Tau3MemoryCard,
+    *,
+    template: str | None = None,
+    heading: str = "Train-only correction memory",
+) -> str:
     template = template or (
-        "\n\nRelevant train-only correction memory:\n"
+        "\n\n{memory_heading}:\n"
         "{memory_card}\n\n"
         "Use this memory only as decision guidance. Do not copy IDs, hidden facts, or raw wording."
     )
-    return template.format(memory_card=card.display_text, memory_card_id=card.card_id)
+    return template.format(memory_card=card.display_text, memory_card_id=card.card_id, memory_heading=heading)

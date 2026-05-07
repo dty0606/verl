@@ -137,20 +137,36 @@ def main() -> int:
     parser.add_argument("--failure-threshold", type=float, default=1.0)
     parser.add_argument("--failed-response-chars", type=int, default=1400)
     parser.add_argument("--include-suspicious", action="store_true", help="Keep obvious runaway outputs in the probe.")
+    parser.add_argument(
+        "--require-no-successful-peer",
+        action="store_true",
+        help="If rollout rows include uid, keep only failed rows whose uid group has no successful sample.",
+    )
     args = parser.parse_args()
 
     memory_bank = load_memory_bank(args.memory_path)
     rollout_paths = [Path(item).expanduser() for item in args.rollout]
     output_path = Path(args.output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = list(iter_rollout_rows(rollout_paths))
+    uid_has_success: dict[str, bool] = {}
+    for row in rows:
+        uid = row.get("uid")
+        if uid is None:
+            continue
+        key = str(uid)
+        uid_has_success[key] = uid_has_success.get(key, False) or row_score(row) >= args.failure_threshold
 
     written = 0
     arm_counts = {"T0_original": 0, "T1_relevant_memory": 0, "T2_random_memory": 0}
     with output_path.open("w", encoding="utf-8") as out:
-        for row in iter_rollout_rows(rollout_paths):
+        for row in rows:
             if written >= args.max_samples:
                 break
             if row_score(row) >= args.failure_threshold:
+                continue
+            uid = row.get("uid")
+            if args.require_no_successful_peer and uid is not None and uid_has_success.get(str(uid), False):
                 continue
             output_text = str(row.get("output", ""))
             if not args.include_suspicious and looks_suspicious(output_text):
@@ -184,6 +200,8 @@ def main() -> int:
                     "source_index": row.get("_source_index"),
                     "prompt": build_prompt(prompt=prompt, feedback=feedback, memory_section=memory_section),
                     "feedback_available": bool(feedback),
+                    "uid": row.get("uid"),
+                    "no_successful_peer_filter_applied": bool(args.require_no_successful_peer),
                     "output_chars": len(output_text),
                 }
                 out.write(json.dumps(payload, ensure_ascii=False) + "\n")

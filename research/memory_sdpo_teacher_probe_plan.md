@@ -29,7 +29,7 @@ loss:
 - `verl/trainer/config/tau3_sdpo_live.yaml` adds `tau3.sdpo.memory.*` config.
 - `run_local_tau3_sdpo_live_p5.sh` forwards `SDPO_MEMORY_*` env vars into Hydra.
 
-## Offline Probe
+## Offline Prompt Builder
 
 Build prompt variants from pulled rollout JSONLs:
 
@@ -49,7 +49,10 @@ T1_relevant_memory: original SDPO + relevant compact memory card
 T2_random_memory: original SDPO + random compact memory card
 ```
 
-Green-light a tiny Memory-SDPO run only if T1 produces cleaner, more actionable teacher outputs than T0 and T2 on hard workflow prefixes.
+This script only builds probe prompts. It does not call the teacher model or
+score outputs. Green-light a tiny Memory-SDPO run only after a separate model
+scoring/manual-rubric step shows that T1 produces cleaner, more actionable
+teacher outputs than T0 and T2 on hard workflow prefixes.
 
 ## Training Toggle
 
@@ -60,6 +63,7 @@ export SDPO_MEMORY_ENABLED=true
 export SDPO_MEMORY_PATH=research/memory_cards/tau3_airline_seed_cards.jsonl
 export SDPO_MEMORY_MODE=relevant
 export SDPO_MEMORY_INJECT_WHEN=no_solution
+export SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK=false
 export SDPO_ARM=original
 bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" memory_sdpo_probe json
 ```
@@ -68,10 +72,12 @@ Useful W&B metrics:
 
 ```text
 self_distillation/memory_available_fraction
+self_distillation/memory_eligible_fraction
 self_distillation/memory_used_fraction
 self_distillation/memory_random_used_fraction
 self_distillation/memory_no_solution_used_fraction
 self_distillation/memory_section_char_mean
+self_distillation/memory_used_and_prompt_saturated_fraction
 self_distillation/teacher_prompt_token_mean
 self_distillation/teacher_prompt_saturation_fraction
 ```

@@ -44,6 +44,9 @@ export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 export USER="${USER:-$(whoami)}"
 export SDPO_OUTPUT_ROOT="${SDPO_OUTPUT_ROOT:-$PROJECT_ROOT/output/SDPO}"
 export SDPO_CHECKPOINT_ROOT="${SDPO_CHECKPOINT_ROOT:-$PROJECT_ROOT/checkpoints/SDPO}"
+if [ -n "${SDPO_MEMORY_PATH:-}" ] && [[ "$SDPO_MEMORY_PATH" != /* ]]; then
+    export SDPO_MEMORY_PATH="$PROJECT_ROOT/${SDPO_MEMORY_PATH#./}"
+fi
 
 if [ -z "${TAU3_LIVE_USER_MODEL:-}" ]; then
     echo "Error: TAU3_LIVE_USER_MODEL must be set."
@@ -149,6 +152,7 @@ ARGS=(
     "tau3.sdpo.memory.mode=${SDPO_MEMORY_MODE:-relevant}"
     "tau3.sdpo.memory.inject_when=${SDPO_MEMORY_INJECT_WHEN:-no_solution}"
     "tau3.sdpo.memory.fail_on_error=${SDPO_MEMORY_FAIL_ON_ERROR:-true}"
+    "tau3.sdpo.memory.allow_without_feedback=${SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK:-false}"
     "trainer.project_name=${PROJECT_NAME:-SDPO-${USER}}"
     "trainer.experiment_name=$EXP_NAME"
     "trainer.total_epochs=${TOTAL_EPOCHS:-300}"
@@ -254,7 +258,7 @@ echo "Rollout n: ${ROLLOUT_BATCH_SIZE:-8}"
 echo "Max response length: ${MAX_RESPONSE_LENGTH:-16384}"
 echo "SDPO max reprompt len: ${SDPO_MAX_REPROMPT_LEN:-16384}"
 echo "SDPO reprompt truncation: ${SDPO_REPROMPT_TRUNCATION:-right}"
-echo "SDPO memory: enabled=${SDPO_MEMORY_ENABLED:-false} mode=${SDPO_MEMORY_MODE:-relevant} inject_when=${SDPO_MEMORY_INJECT_WHEN:-no_solution} path=${SDPO_MEMORY_PATH:-<unset>}"
+echo "SDPO memory: enabled=${SDPO_MEMORY_ENABLED:-false} mode=${SDPO_MEMORY_MODE:-relevant} inject_when=${SDPO_MEMORY_INJECT_WHEN:-no_solution} allow_without_feedback=${SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK:-false} path=${SDPO_MEMORY_PATH:-<unset>}"
 echo "vLLM profile: $TAU3_VLLM_PROFILE"
 echo "VLLM_USE_V1: ${VLLM_USE_V1:-<unset>}"
 echo "vLLM prefix/chunked/max-batched/eager: ${VLLM_ENABLE_PREFIX_CACHING:-<config>}/${VLLM_ENABLE_CHUNKED_PREFILL:-<config>}/${VLLM_MAX_NUM_BATCHED_TOKENS:-<config>}/${VLLM_ENFORCE_EAGER:-<config>}"

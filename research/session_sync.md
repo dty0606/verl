@@ -663,8 +663,9 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - `SDPO_MEMORY_PATH=research/memory_cards/tau3_airline_seed_cards.jsonl`
   - `SDPO_MEMORY_MODE=relevant|random`
   - `SDPO_MEMORY_INJECT_WHEN=no_solution`
+  - `SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK=false`
 - New W&B metrics include `self_distillation/memory_used_fraction`, `memory_random_used_fraction`, `memory_no_solution_used_fraction`, and `memory_section_char_mean`.
-- Recommended next step before a full Memory-SDPO run: build T0/T1/T2 teacher probe prompts from failed rollout JSONLs and verify relevant memory beats random memory on teacher next-action quality.
+- Recommended next step before a full Memory-SDPO run: build T0/T1/T2 teacher probe prompts from failed rollout JSONLs, run a separate teacher-output scoring/manual rubric pass, and verify relevant memory beats random memory on teacher next-action quality.
 - Rationale for `TAU3_RETRY_STEP_ON_TRANSIENT=0`: replaying outer `env.step(action)` can duplicate transactional writes if the tool state changed before the user-simulator call failed. Prefer retry inside Tau2/LiteLLM user-call handling; the outer layer should mark/mask env errors rather than replay actions.
 
 ## Evidence Carried Forward

@@ -138,11 +138,12 @@ tau3:
       mode: ${oc.env:SDPO_MEMORY_MODE,relevant}
       inject_when: ${oc.env:SDPO_MEMORY_INJECT_WHEN,no_solution}
       fail_on_error: True
+      allow_without_feedback: False
       max_card_chars: 2200
       query_failed_response_chars: 1400
       template: |-
 
-        Relevant train-only correction memory:
+        {memory_heading}:
         {memory_card}
 
         Use this memory only as decision guidance. Do not copy IDs, hidden facts, or raw wording.

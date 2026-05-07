@@ -1543,7 +1543,12 @@ class RayPPOTrainer:
             if memory_load_error and bool(memory_cfg.get("fail_on_error", True)):
                 raise RuntimeError(f"Tau3 SDPO memory is enabled but unavailable: {memory_load_error}")
         memory_mode = str(memory_cfg.get("mode", "relevant")).lower()
+        if memory_mode not in {"relevant", "lexical", "random", "shuffle", "shuffled"}:
+            raise ValueError(f"Unsupported tau3.sdpo.memory.mode={memory_mode}")
         memory_inject_when = str(memory_cfg.get("inject_when", "no_solution")).lower()
+        if memory_inject_when not in {"always", "failed", "failed_only", "all_failures", "no_solution"}:
+            raise ValueError(f"Unsupported tau3.sdpo.memory.inject_when={memory_inject_when}")
+        allow_memory_without_feedback = bool(memory_cfg.get("allow_without_feedback", False))
         memory_template = memory_cfg.get("template", None)
         memory_query_failed_response_chars = int(memory_cfg.get("query_failed_response_chars", 1400))
 
@@ -1556,6 +1561,7 @@ class RayPPOTrainer:
         memory_used = []
         memory_random_used = []
         memory_no_solution_used = []
+        memory_eligible = []
         memory_section_lengths = []
         for i in range(batch_size):
             raw_prompt = list(raw_prompts[i]) if i < len(raw_prompts) else []
@@ -1572,6 +1578,7 @@ class RayPPOTrainer:
                 and on_failure_path
                 and memory_inject_when in {"always", "failed", "failed_only", "all_failures", "no_solution"}
                 and (memory_inject_when != "no_solution" or not has_solution)
+                and (allow_memory_without_feedback or has_feedback)
             )
             if try_memory:
                 query_parts = [prompt_text]
@@ -1618,6 +1625,7 @@ class RayPPOTrainer:
             memory_used.append(has_memory)
             memory_random_used.append(has_memory and memory_mode in {"random", "shuffle", "shuffled"})
             memory_no_solution_used.append(has_memory and not has_solution)
+            memory_eligible.append(try_memory)
             memory_section_lengths.append(len(memory_section) if has_memory else 0)
 
         if sum(target_mask_values) == 0:
@@ -1630,6 +1638,7 @@ class RayPPOTrainer:
                 "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
                 "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
                 "self_distillation/memory_available_fraction": sum(bool(x) for x in memory_available) / batch_size,
+                "self_distillation/memory_eligible_fraction": sum(bool(x) for x in memory_eligible) / batch_size,
                 "self_distillation/memory_used_fraction": 0.0,
                 "self_distillation/memory_load_error": 1.0 if memory_load_error else 0.0,
             }
@@ -1691,6 +1700,7 @@ class RayPPOTrainer:
             "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
             "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
             "self_distillation/memory_available_fraction": sum(bool(x) for x in memory_available) / batch_size,
+            "self_distillation/memory_eligible_fraction": sum(bool(x) for x in memory_eligible) / batch_size,
             "self_distillation/memory_used_fraction": sum(bool(x) for x in memory_used) / batch_size,
             "self_distillation/memory_random_used_fraction": sum(bool(x) for x in memory_random_used) / batch_size,
             "self_distillation/memory_no_solution_used_fraction": sum(bool(x) for x in memory_no_solution_used)
@@ -1698,6 +1708,17 @@ class RayPPOTrainer:
             "self_distillation/memory_section_char_mean": float(np.mean(memory_section_lengths))
             if memory_section_lengths
             else 0.0,
+            "self_distillation/memory_used_and_prompt_saturated_fraction": sum(
+                bool(used) and bool(saturated)
+                for used, saturated in zip(
+                    memory_used,
+                    (teacher_prompt_attention_mask.float().sum(dim=1) >= max_reprompt_len)
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                )
+            )
+            / batch_size,
             "self_distillation/memory_load_error": 1.0 if memory_load_error else 0.0,
             "self_distillation/teacher_prompt_token_mean": float(
                 teacher_prompt_attention_mask.float().sum(dim=1).mean().item()
