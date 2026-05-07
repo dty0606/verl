@@ -181,7 +181,7 @@ def _interesting_config_fields(cfg_dict: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, dict):
             for key, child in value.items():
                 path = f"{prefix}.{key}" if prefix else key
-                if any(needle in key.lower() for needle in needles):
+                if isinstance(key, str) and any(needle in key.lower() for needle in needles):
                     found[path] = child
                 if isinstance(child, dict):
                     stack.append((path, child))
