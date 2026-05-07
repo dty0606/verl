@@ -1003,6 +1003,29 @@ Run only after Recipe 9 passes. Keep all shared rollout settings identical to
 Recipe 8 so GRPO and SDPO remain an apples-to-apples comparison; the only
 algorithmic difference should be `loss_mode=sdpo` plus the feedback teacher path.
 
+For the low-EBS east P5 vLLM V1 environment, prefer the dedicated original-SDPO
+overnight helper. It sets `SDPO_ARM=original` and moves all heavy artifacts to
+NVMe:
+
+```bash
+cd ~/verl_tau3_sdpo_vllm20
+source activate sdpo-vllm20-v1
+
+nohup bash scripts/p5_run_east_original_sdpo_full.sh \
+  > /mnt/sagemaker-nvme/tau3_sdpo/logs/east_p5_original_sdpo_vllm_v1_full_300.nohup.log 2>&1 &
+echo $! > /mnt/sagemaker-nvme/tau3_sdpo/logs/east_p5_original_sdpo_vllm_v1_full_300.pid
+disown
+```
+
+Quick progress checks:
+
+```bash
+tail -f /mnt/sagemaker-nvme/tau3_sdpo/logs/east_p5_original_sdpo_vllm_v1_full_300.nohup.log
+grep -E "training/global_step|actor/pg_loss|self_distillation|tau3_live" \
+  /mnt/sagemaker-nvme/tau3_sdpo/logs/east_p5_original_sdpo_vllm_v1_full_300.console.log | tail -20
+df -h /home/sagemaker-user /mnt/sagemaker-nvme
+```
+
 ```bash
 cd ~/verl_tau3_sdpo
 

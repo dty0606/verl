@@ -234,6 +234,26 @@ bash scripts/p5_run_vllm_v1_capacity_matrix.sh \
   2>&1 | tee "$NVME_ROOT/logs/east_p5_original_sdpo_vllm_v1_1step.console.log"
 ```
 
+If the goal is to launch the overnight original-SDPO baseline immediately, use
+the NVMe-safe full-run helper instead of rebuilding the long env-var block by
+hand:
+
+```bash
+cd "$CODE_DIR"
+source activate sdpo-vllm20-v1
+
+nohup bash scripts/p5_run_east_original_sdpo_full.sh \
+  > /mnt/sagemaker-nvme/tau3_sdpo/logs/east_p5_original_sdpo_vllm_v1_full_300.nohup.log 2>&1 &
+echo $! > /mnt/sagemaker-nvme/tau3_sdpo/logs/east_p5_original_sdpo_vllm_v1_full_300.pid
+disown
+
+tail -f /mnt/sagemaker-nvme/tau3_sdpo/logs/east_p5_original_sdpo_vllm_v1_full_300.nohup.log
+```
+
+This helper sets `MODE=sdpo` and `SDPO_ARM=original`, uses the known-good vLLM
+V1 profile `02_auto_prefix_24k_48k`, and moves Ray temp, trainer checkpoints,
+rollout JSONLs, W&B files, cache dirs, and logs to `/mnt/sagemaker-nvme`.
+
 ## Build Env
 
 ```bash

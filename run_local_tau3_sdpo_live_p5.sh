@@ -179,6 +179,12 @@ fi
 if [ -n "${ROLLOUT_DATA_DIR:-}" ]; then
     ARGS+=("trainer.rollout_data_dir=$ROLLOUT_DATA_DIR")
 fi
+if [ -n "${MAX_ACTOR_CKPT_TO_KEEP:-}" ]; then
+    ARGS+=("trainer.max_actor_ckpt_to_keep=$MAX_ACTOR_CKPT_TO_KEEP")
+fi
+if [ -n "${MAX_CRITIC_CKPT_TO_KEEP:-}" ]; then
+    ARGS+=("trainer.max_critic_ckpt_to_keep=$MAX_CRITIC_CKPT_TO_KEEP")
+fi
 if [ -n "${VLLM_ENABLE_PREFIX_CACHING:-}" ]; then
     ARGS+=("actor_rollout_ref.rollout.enable_prefix_caching=$VLLM_ENABLE_PREFIX_CACHING")
 fi
