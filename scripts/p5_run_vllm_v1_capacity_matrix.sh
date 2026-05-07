@@ -62,12 +62,21 @@ export VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-8}"
 export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-8}"
 export PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
-export VAL_N="${VAL_N:-1}"
+export VAL_N="${VAL_N:-4}"
 export ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-1}"
 export ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.65}"
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-16384}"
 export MODEL_ALIAS="${MODEL_ALIAS:-real_sft_step800}"
 export PROJECT_NAME="${PROJECT_NAME:-SDPO-vllm-v1-capacity}"
+export TAU3_BEDROCK_MAX_RETRIES="${TAU3_BEDROCK_MAX_RETRIES:-3}"
+export TAU3_BEDROCK_RETRY_DELAYS="${TAU3_BEDROCK_RETRY_DELAYS:-15,30,60}"
+export TAU3_BEDROCK_RETRY_JITTER="${TAU3_BEDROCK_RETRY_JITTER:-0.2}"
+export TAU3_MASK_ENV_ERROR_ROLLOUTS="${TAU3_MASK_ENV_ERROR_ROLLOUTS:-1}"
+export TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD="${TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD:-0.25}"
+export TAU3_RETRY_STEP_ON_TRANSIENT="${TAU3_RETRY_STEP_ON_TRANSIENT:-0}"
+if [ -z "${TAU3_LIVE_USER_ARGS_JSON:-}" ]; then
+    export TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'
+fi
 
 echo "----------------------------------------------------------------"
 echo "Tau3 vLLM V1 capacity matrix"
@@ -81,6 +90,10 @@ echo "Run name prefix: $RUN_NAME_PREFIX"
 echo "Capacity profiles: $CAPACITY_PROFILES"
 echo "VLLM_USE_V1: $VLLM_USE_V1"
 echo "Tau3 all-messages observation: $TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION"
+echo "Tau3 Bedrock retries: max=$TAU3_BEDROCK_MAX_RETRIES delays=$TAU3_BEDROCK_RETRY_DELAYS jitter=$TAU3_BEDROCK_RETRY_JITTER"
+echo "Tau3 env-error guardrails: mask=$TAU3_MASK_ENV_ERROR_ROLLOUTS skip_threshold=$TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD"
+echo "Tau3 user args: $TAU3_LIVE_USER_ARGS_JSON"
+echo "Tau3 outer step retry enabled: $TAU3_RETRY_STEP_ON_TRANSIENT"
 echo "----------------------------------------------------------------"
 
 python "$PROJECT_ROOT/scripts/p5_preflight_vllm_v1.py" \

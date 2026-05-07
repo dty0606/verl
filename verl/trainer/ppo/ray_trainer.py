@@ -1312,6 +1312,56 @@ class RayPPOTrainer:
         return tokenizer.decode(selected, skip_special_tokens=False)
 
     @staticmethod
+    def _env_error_mask_from_reward_extras(
+        reward_extra_infos_dict: Optional[dict[str, list]],
+        *,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        values = None
+        if reward_extra_infos_dict is not None:
+            values = reward_extra_infos_dict.get("tau3_live/env_error_fraction")
+        if values is None:
+            return torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        mask_values = []
+        for item in list(values)[:batch_size]:
+            try:
+                mask_values.append(float(item) >= 0.5)
+            except (TypeError, ValueError):
+                mask_values.append(False)
+        if len(mask_values) < batch_size:
+            mask_values.extend([False] * (batch_size - len(mask_values)))
+        return torch.tensor(mask_values, dtype=torch.bool, device=device)
+
+    @staticmethod
+    def _mask_env_error_rollouts(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        env_error_mask: torch.Tensor,
+        *,
+        global_step: int,
+    ) -> None:
+        if not bool(env_error_mask.any().item()):
+            return
+
+        batch.batch["response_mask"][env_error_mask] = 0
+        reward_tensor[env_error_mask] = 0.0
+
+        # GRPO normalizes rewards within UID groups. Keep env-error samples from
+        # contaminating sibling samples' group baseline by moving them into
+        # singleton groups whose response masks are already zeroed.
+        uids = batch.non_tensor_batch.get("uid")
+        if uids is None:
+            return
+        masked_indices = env_error_mask.detach().cpu().nonzero(as_tuple=False).flatten().tolist()
+        new_uids = np.array(uids, dtype=object, copy=True)
+        for idx in masked_indices:
+            if idx < len(new_uids):
+                new_uids[idx] = f"{new_uids[idx]}__env_error_{global_step}_{idx}"
+        batch.non_tensor_batch["uid"] = new_uids
+
+    @staticmethod
     def _collect_feedback(
         *,
         include_environment_feedback: bool,
@@ -1419,6 +1469,13 @@ class RayPPOTrainer:
         success_threshold = float(sdpo_cfg.get("success_reward_threshold", 1.0))
         failure_threshold = float(sdpo_cfg.get("failure_reward_threshold", success_threshold))
         failed_mask = seq_scores < failure_threshold
+        env_error_mask = self._env_error_mask_from_reward_extras(
+            reward_extra_infos_dict,
+            batch_size=batch_size,
+            device=responses.device,
+        )
+        if bool(env_error_mask.any().item()):
+            failed_mask = failed_mask & ~env_error_mask
         failed_mask_list = failed_mask.detach().cpu().tolist()
 
         feedback_list = self._collect_feedback(
@@ -1502,6 +1559,7 @@ class RayPPOTrainer:
                 "self_distillation/feedback_used_fraction": 0.0,
                 "self_distillation/success_sample_fraction": 0.0,
                 "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
+                "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
             }
             return None, zeros, metrics
 
@@ -1559,6 +1617,7 @@ class RayPPOTrainer:
             "self_distillation/feedback_used_fraction": sum(bool(x) for x in feedback_used) / batch_size,
             "self_distillation/success_sample_fraction": sum(bool(x) for x in solutions_used) / batch_size,
             "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
+            "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
             "self_distillation/teacher_prompt_token_mean": float(
                 teacher_prompt_attention_mask.float().sum(dim=1).mean().item()
             ),
@@ -1750,6 +1809,35 @@ class RayPPOTrainer:
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
+                    env_error_mask = self._env_error_mask_from_reward_extras(
+                        reward_extra_infos_dict,
+                        batch_size=reward_tensor.size(0),
+                        device=reward_tensor.device,
+                    )
+                    env_error_fraction = float(env_error_mask.float().mean().item())
+                    if env_error_fraction > 0.0:
+                        metrics["tau3_live/env_error_fraction_train"] = env_error_fraction
+                    mask_env_errors = os.environ.get("TAU3_MASK_ENV_ERROR_ROLLOUTS", "1").strip().lower() not in {
+                        "0",
+                        "false",
+                        "no",
+                        "off",
+                    }
+                    if mask_env_errors and env_error_fraction > 0.0:
+                        self._mask_env_error_rollouts(
+                            batch,
+                            reward_tensor,
+                            env_error_mask,
+                            global_step=self.global_steps,
+                        )
+                        metrics["tau3_live/env_error_masked_fraction"] = env_error_fraction
+                    try:
+                        env_error_skip_threshold = float(os.environ.get("TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD", "0.25"))
+                    except ValueError:
+                        env_error_skip_threshold = 0.25
+                    skip_actor_update_due_env_error = env_error_fraction >= env_error_skip_threshold > 0.0
+                    metrics["tau3_live/env_error_skip_update"] = float(skip_actor_update_due_env_error)
+
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
                     # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
@@ -1866,7 +1954,9 @@ class RayPPOTrainer:
                         )
 
                     # update critic
-                    if self.use_critic:
+                    if self.use_critic and skip_actor_update_due_env_error:
+                        metrics["critic/update_skipped_env_error"] = 1.0
+                    elif self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
                             critic_output = self._update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
@@ -1876,6 +1966,13 @@ class RayPPOTrainer:
                     if self.config.trainer.critic_warmup > self.global_steps:
                         # Still in critic warmup, only update weights to wake up rollout replicas.
                         self.checkpoint_manager.update_weights(self.global_steps)
+                    elif skip_actor_update_due_env_error:
+                        # Bedrock/user-simulator outages are not model failures.
+                        # Keep rollout replicas alive, but do not optimize on a
+                        # batch whose env-error fraction crossed the guardrail.
+                        with marked_timer("update_weights", timing_raw, color="red"):
+                            self.checkpoint_manager.update_weights(self.global_steps)
+                        metrics["actor/update_skipped_env_error"] = 1.0
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):

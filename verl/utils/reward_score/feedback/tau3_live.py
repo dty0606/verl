@@ -62,6 +62,11 @@ def _is_terminal_live_result(live_result: dict[str, Any]) -> bool:
     return status == "terminated" or terminal_reason not in {"", "running"}
 
 
+def _is_env_error_live_result(live_result: dict[str, Any]) -> bool:
+    terminal_reason = str(live_result.get("terminal_reason", "") or "").lower()
+    return bool(live_result.get("env_error")) or terminal_reason in {"env_error", "environment_error"}
+
+
 def _best_available_reward(
     *,
     parsed_ground_truth: dict[str, Any],
@@ -72,6 +77,9 @@ def _best_available_reward(
     """Return official tau reward when present; fall back only for legacy proxy runs."""
 
     extra_info = extra_info or {}
+
+    if _is_env_error_live_result(live_result):
+        return 0.0, "official_gym_env_error"
 
     if _is_terminal_live_result(live_result):
         for key in ("final_reward", "reward", "score"):
@@ -183,6 +191,8 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
     runtime = str(live_result.get("runtime") or extra_info.get("tau3_runtime") or "").lower()
     terminal = float(_is_terminal_live_result(live_result))
     terminal_reason = str(live_result.get("terminal_reason") or "").lower()
+    env_error = float(_is_env_error_live_result(live_result))
+    bedrock_error = float(bool(live_result.get("bedrock_error")))
     budget_exhausted = float(
         terminal_reason in {"truncated", "max_steps", "max_user_turns"}
         or reward_source == "official_gym_nonterminal_snapshot"
@@ -190,8 +200,12 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
     turn_count = float(live_result.get("turn_count") or 0.0)
     tool_count = float(len(live_result.get("executed_tools") or []))
     official_reward_path_violation = float(
-        runtime == "official_gym" and _is_terminal_live_result(live_result) and reward_source != "official_or_runtime"
+        runtime == "official_gym"
+        and _is_terminal_live_result(live_result)
+        and reward_source not in {"official_or_runtime", "official_gym_env_error"}
     )
+    if env_error:
+        feedback = ""
 
     result = {
         "score": float(reward),
@@ -206,11 +220,16 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         "tau3_live/reward_source_nonterminal_fraction": (
             1.0 if reward_source == "official_gym_nonterminal_snapshot" else 0.0
         ),
+        "tau3_live/reward_source_env_error_fraction": 1.0 if reward_source == "official_gym_env_error" else 0.0,
         "tau3_live/reward_source_proxy_fallback_fraction": 1.0 if reward_source == "legacy_proxy_heuristic" else 0.0,
         "tau3_live/reward_source_official_violation_fraction": official_reward_path_violation,
         "tau3_live/terminal_fraction": terminal,
         "tau3_live/nonterminal_fraction": 1.0 - terminal,
         "tau3_live/budget_exhausted_fraction": budget_exhausted,
+        "tau3_live/env_error_fraction": env_error,
+        "tau3_live/bedrock_error_fraction": bedrock_error,
+        "tau3_live/bedrock_retry_count": float(live_result.get("bedrock_retry_count") or 0.0),
+        "tau3_live/bedrock_fallback_fraction": float(bool(live_result.get("bedrock_fallback_model"))),
         "tau3_live/turn_count": turn_count,
         "tau3_live/tool_count": tool_count,
     }

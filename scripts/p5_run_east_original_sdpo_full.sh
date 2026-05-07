@@ -32,6 +32,15 @@ export TAU3_LIVE_USER_MODEL="${TAU3_LIVE_USER_MODEL:-us.anthropic.claude-sonnet-
 export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION="${TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION:-0}"
 export TAU3_LIVE_RUNTIME="${TAU3_LIVE_RUNTIME:-official_gym}"
 export TAU3_LIVE_FEEDBACK_FORMAT="${TAU3_LIVE_FEEDBACK_FORMAT:-json}"
+export TAU3_BEDROCK_MAX_RETRIES="${TAU3_BEDROCK_MAX_RETRIES:-3}"
+export TAU3_BEDROCK_RETRY_DELAYS="${TAU3_BEDROCK_RETRY_DELAYS:-15,30,60}"
+export TAU3_BEDROCK_RETRY_JITTER="${TAU3_BEDROCK_RETRY_JITTER:-0.2}"
+export TAU3_MASK_ENV_ERROR_ROLLOUTS="${TAU3_MASK_ENV_ERROR_ROLLOUTS:-1}"
+export TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD="${TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD:-0.25}"
+export TAU3_RETRY_STEP_ON_TRANSIENT="${TAU3_RETRY_STEP_ON_TRANSIENT:-0}"
+if [ -z "${TAU3_LIVE_USER_ARGS_JSON:-}" ]; then
+    export TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'
+fi
 
 export MODEL_PATH="${MODEL_PATH:-$HOME/verl_tau3_sdpo/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface}"
 export MODEL_ALIAS="${MODEL_ALIAS:-real_sft_step800}"
@@ -74,6 +83,10 @@ echo "Rollouts: $ROLLOUT_OUTPUT_ROOT"
 echo "Logs: $LOG_ROOT"
 echo "Ray tmp: $RAY_TMPDIR"
 echo "TMPDIR: $TMPDIR"
+echo "Tau3 Bedrock retries: max=$TAU3_BEDROCK_MAX_RETRIES delays=$TAU3_BEDROCK_RETRY_DELAYS jitter=$TAU3_BEDROCK_RETRY_JITTER"
+echo "Tau3 env-error guardrails: mask=$TAU3_MASK_ENV_ERROR_ROLLOUTS skip_threshold=$TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD"
+echo "Tau3 user args: $TAU3_LIVE_USER_ARGS_JSON"
+echo "Tau3 outer step retry enabled: $TAU3_RETRY_STEP_ON_TRANSIENT"
 echo "----------------------------------------------------------------"
 df -h /home/sagemaker-user /mnt/sagemaker-nvme || true
 

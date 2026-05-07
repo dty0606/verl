@@ -746,6 +746,14 @@ python3 examples/data_preprocess/tau3_live_multiturn.py \
 export HF_CKPT=$(ls -d checkpoints/SDPO/tau3_verl_sft/*/global_step_*/huggingface | tail -1)
 export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
 export TAU3_LIVE_RUNTIME=official_gym
+export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
+export TAU3_BEDROCK_MAX_RETRIES=3
+export TAU3_BEDROCK_RETRY_DELAYS=15,30,60
+export TAU3_BEDROCK_RETRY_JITTER=0.2
+export TAU3_MASK_ENV_ERROR_ROLLOUTS=1
+export TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD=0.25
+export TAU3_RETRY_STEP_ON_TRANSIENT=0
+export TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'
 export MODEL_PATH="$HF_CKPT"
 export ENABLE_THINKING=true
 export VLLM_LANGUAGE_MODEL_ONLY=true
@@ -802,6 +810,14 @@ cd ~/verl_tau3_sdpo
 export HF_CKPT=<path to final SFT global_step_*/huggingface>
 export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
 export TAU3_LIVE_RUNTIME=official_gym
+export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
+export TAU3_BEDROCK_MAX_RETRIES=3
+export TAU3_BEDROCK_RETRY_DELAYS=15,30,60
+export TAU3_BEDROCK_RETRY_JITTER=0.2
+export TAU3_MASK_ENV_ERROR_ROLLOUTS=1
+export TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD=0.25
+export TAU3_RETRY_STEP_ON_TRANSIENT=0
+export TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'
 export MODEL_PATH="$HF_CKPT"
 export ENABLE_THINKING=true
 export VLLM_LANGUAGE_MODEL_ONLY=true
@@ -856,6 +872,13 @@ export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
 export TAU3_LIVE_RUNTIME=official_gym
 export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
 export TAU3_LIVE_FEEDBACK_FORMAT=json
+export TAU3_BEDROCK_MAX_RETRIES=3
+export TAU3_BEDROCK_RETRY_DELAYS=15,30,60
+export TAU3_BEDROCK_RETRY_JITTER=0.2
+export TAU3_MASK_ENV_ERROR_ROLLOUTS=1
+export TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD=0.25
+export TAU3_RETRY_STEP_ON_TRANSIENT=0
+export TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'
 export VLLM_USE_V1=1
 export VLLM_KV_CACHE_DTYPE=auto
 export VLLM_ENABLE_PREFIX_CACHING=true
@@ -892,6 +915,8 @@ Pass criteria:
 - Preflight prints `PREFLIGHT=PASS`.
 - The summary contains `PASS 02_auto_prefix_24k_48k`.
 - No prompt clipping and no repeated response/budget exhaustion collapse.
+- `tau3_live/env_error_fraction` and `tau3_live/bedrock_error_fraction` stay near zero; if they spike, those rows are masked and any batch above `TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD` skips actor update.
+- `TAU3_RETRY_STEP_ON_TRANSIENT=0` remains the default because replaying an outer `env.step(action)` can duplicate a write; bounded retry is requested through Tau2/LiteLLM user args instead.
 - No vLLM `wake_up` / `update_weights` crash.
 - No repeated FlashInfer GDN JIT failure after warmup.
 - Pull 2-3 rollout JSONLs and confirm no open `<think>`, tag spam, or max-length repetitive continuation.
@@ -952,6 +977,14 @@ cd ~/verl_tau3_sdpo
 export HF_CKPT=$(ls -d checkpoints/SDPO/tau3_verl_sft/*/global_step_*/huggingface | tail -1)
 export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
 export TAU3_LIVE_RUNTIME=official_gym
+export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
+export TAU3_BEDROCK_MAX_RETRIES=3
+export TAU3_BEDROCK_RETRY_DELAYS=15,30,60
+export TAU3_BEDROCK_RETRY_JITTER=0.2
+export TAU3_MASK_ENV_ERROR_ROLLOUTS=1
+export TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD=0.25
+export TAU3_RETRY_STEP_ON_TRANSIENT=0
+export TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'
 export MODEL_PATH="$HF_CKPT"
 export ENABLE_THINKING=true
 export VLLM_LANGUAGE_MODEL_ONLY=true
@@ -1071,6 +1104,9 @@ bash run_local_tau3_sdpo_live_p5.sh \
 
 Track at minimum: terminal/nonterminal fractions, budget-exhausted fraction,
 turn/tool counts, response clip ratio, success count, tokens per success,
+`tau3_live/env_error_fraction`, `tau3_live/bedrock_error_fraction`,
+`tau3_live/bedrock_retry_count`, `actor/update_skipped_env_error`,
+`critic/update_skipped_env_error` if a critic is enabled,
 `self_distillation/reprompt_sample_fraction`, `feedback_used_fraction`,
 `teacher_prompt_saturation_fraction`, finite `actor/pg_loss`, and sane
 `actor/grad_norm`.

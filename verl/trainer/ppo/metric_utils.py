@@ -105,6 +105,10 @@ def add_validation_metric_aliases(
         "incorrect_format": "incorrect_format",
         "tau3_live/nonterminal_fraction": "nonterminal_fraction",
         "tau3_live/budget_exhausted_fraction": "budget_exhausted_fraction",
+        "tau3_live/env_error_fraction": "env_error_fraction",
+        "tau3_live/bedrock_error_fraction": "bedrock_error_fraction",
+        "tau3_live/bedrock_retry_count": "bedrock_retry_count",
+        "tau3_live/bedrock_fallback_fraction": "bedrock_fallback_fraction",
         "tau3_live/turn_count": "turn_count",
         "tau3_live/tool_count": "tool_count",
     }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -100,6 +101,110 @@ def to_jsonable(value: Any) -> Any:
 def compact_text(text: str, limit: int = 220) -> str:
     text = " ".join((text or "").split())
     return text[:limit] + ("..." if len(text) > limit else "")
+
+
+BEDROCK_TRANSIENT_ERROR_MARKERS = (
+    "serviceunavailableerror",
+    "service unavailable",
+    "bedrock is unable to process your request",
+    "ratelimiterror",
+    "rate limit",
+    "too many tokens",
+    "throttl",
+    "modeltimeouterror",
+    "timeout",
+    "temporarily unavailable",
+    "internalserverexception",
+)
+
+TAU3_ENV_ERROR_MARKERS = (
+    "simulation loop exited with an exception",
+    "simulation ended with an exception",
+    "orchestrator error",
+    "traceback (most recent call last)",
+    "litellm.",
+) + BEDROCK_TRANSIENT_ERROR_MARKERS
+
+
+def _json_preview(value: Any, limit: int = 1200) -> str:
+    try:
+        text = json.dumps(to_jsonable(value), ensure_ascii=False)
+    except Exception:
+        text = str(value)
+    return compact_text(text, limit=limit)
+
+
+def classify_tau3_env_error_payload(*values: Any) -> dict[str, Any]:
+    """Classify Tau3 user-simulator/runtime failures embedded in returned info.
+
+    Tau2/AgentGym can swallow Bedrock/LiteLLM exceptions and return a terminal
+    zero-reward trajectory. We still need to label those as environment errors
+    so GRPO/SDPO does not train on them as ordinary task failures.
+    """
+
+    text = "\n".join(_json_preview(value, limit=4000) for value in values if value is not None)
+    normalized = text.lower()
+    bedrock_error = any(marker in normalized for marker in BEDROCK_TRANSIENT_ERROR_MARKERS)
+    env_error = bedrock_error or any(marker in normalized for marker in TAU3_ENV_ERROR_MARKERS)
+    if not env_error:
+        return {
+            "env_error": False,
+            "bedrock_error": False,
+            "env_error_type": "",
+            "env_error_message": "",
+        }
+
+    error_type = "bedrock_transient" if bedrock_error else "tau3_environment_exception"
+    return {
+        "env_error": True,
+        "bedrock_error": bool(bedrock_error),
+        "env_error_type": error_type,
+        "env_error_message": compact_text(text, limit=480),
+    }
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def tau3_bedrock_retry_delays() -> list[float]:
+    raw = os.environ.get("TAU3_BEDROCK_RETRY_DELAYS", "15,30,60")
+    delays: list[float] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            delays.append(max(0.0, float(item)))
+        except ValueError:
+            continue
+    return delays or [15.0, 30.0, 60.0]
+
+
+def _sleep_before_retry(attempt_idx: int) -> None:
+    delays = tau3_bedrock_retry_delays()
+    delay = delays[min(attempt_idx, len(delays) - 1)]
+    jitter_ratio = max(0.0, _env_float("TAU3_BEDROCK_RETRY_JITTER", 0.2))
+    if jitter_ratio:
+        delay += random.uniform(0.0, delay * jitter_ratio)
+    if delay > 0:
+        time.sleep(delay)
 
 
 def scenario_to_instruction_text(user_scenario: Any) -> str:
@@ -678,6 +783,13 @@ class Tau3GymLiveSession:
     last_action_type: str = ""
     last_parse_error: str = ""
     nl_assertion_judge: dict[str, Any] = field(default_factory=dict)
+    user_model: str = ""
+    env_error: bool = False
+    bedrock_error: bool = False
+    env_error_type: str = ""
+    env_error_message: str = ""
+    bedrock_retry_count: int = 0
+    bedrock_fallback_model: str = ""
 
     def _visible_tool_names(self) -> list[str]:
         tools = self.info.get("tools") or []
@@ -710,6 +822,13 @@ class Tau3GymLiveSession:
             "reward_info_json": self.reward_info_json,
             "simulation_run_json": self.simulation_run_json,
             "diagnostic_source": "tau_agent_gym",
+            "user_model": self.user_model,
+            "env_error": bool(self.env_error),
+            "bedrock_error": bool(self.bedrock_error),
+            "env_error_type": self.env_error_type,
+            "env_error_message": compact_text(self.env_error_message, limit=480),
+            "bedrock_retry_count": int(self.bedrock_retry_count),
+            "bedrock_fallback_model": self.bedrock_fallback_model,
         }
 
 
@@ -794,6 +913,7 @@ class Tau3GymLiveSessionManager:
             latest_observation=observation,
             info=info,
             nl_assertion_judge=nl_assertion_judge,
+            user_model=str(resolved_user_model),
         )
         with cls._lock:
             cls._sessions[request_id] = session
@@ -805,6 +925,99 @@ class Tau3GymLiveSessionManager:
             if request_id not in cls._sessions:
                 raise KeyError(f"tau3 official_gym session {request_id} not found")
             return cls._sessions[request_id]
+
+    @staticmethod
+    def _apply_env_error(
+        session: Tau3GymLiveSession,
+        classification: dict[str, Any],
+        *,
+        terminal_reason: str = "env_error",
+    ) -> None:
+        session.env_error = bool(classification.get("env_error"))
+        session.bedrock_error = bool(classification.get("bedrock_error"))
+        session.env_error_type = str(classification.get("env_error_type") or "")
+        session.env_error_message = str(classification.get("env_error_message") or "")
+        if session.env_error:
+            session.terminated = True
+            session.terminal_reason = terminal_reason
+            session.final_reward = 0.0
+
+    @staticmethod
+    def _configured_user_model_fallbacks(primary_model: str) -> list[str]:
+        raw = os.environ.get("TAU3_LIVE_USER_MODEL_FALLBACKS", "")
+        fallbacks = [item.strip() for item in raw.split(",") if item.strip()]
+        return [model for model in fallbacks if model != primary_model]
+
+    @staticmethod
+    def _try_switch_user_model(session: Tau3GymLiveSession, fallback_model: str) -> bool:
+        """Best-effort switch for Tau2 user simulator model after Bedrock outage.
+
+        Tau2 versions differ in where they store the user LLM. We only mutate
+        existing model-like attributes; if none are found, the rollout is marked
+        as env_error rather than risking a silent no-op.
+        """
+
+        changed = False
+        candidate_objects = [session.env]
+        for attr in ("user", "user_simulator", "_user", "_user_simulator", "orchestrator", "_orchestrator"):
+            nested = getattr(session.env, attr, None)
+            if nested is not None:
+                candidate_objects.append(nested)
+
+        for obj in candidate_objects:
+            for attr in ("user_llm", "_user_llm", "llm", "model", "model_id"):
+                if hasattr(obj, attr):
+                    try:
+                        setattr(obj, attr, fallback_model)
+                        changed = True
+                    except Exception:
+                        pass
+
+        if changed:
+            session.bedrock_fallback_model = fallback_model
+            session.user_model = fallback_model
+        return changed
+
+    @classmethod
+    def _mark_step_exception(
+        cls,
+        session: Tau3GymLiveSession,
+        exc: Exception,
+        *,
+        action_type: str,
+        assistant_text: str = "",
+        tool_name: str | None = None,
+        tool_arguments: dict[str, Any] | None = None,
+        parse_error: str = "",
+    ) -> dict[str, Any]:
+        classification = classify_tau3_env_error_payload(type(exc).__name__, str(exc))
+        if not classification.get("env_error"):
+            classification = {
+                "env_error": True,
+                "bedrock_error": False,
+                "env_error_type": "tau3_environment_exception",
+                "env_error_message": compact_text(f"{type(exc).__name__}: {exc}", limit=480),
+            }
+
+        session.turn_count += 1
+        session.latest_observation = ""
+        session.observation = ""
+        session.info = {}
+        session.last_action_type = action_type
+        session.last_parse_error = parse_error
+        if assistant_text:
+            session.final_assistant_message = assistant_text
+        if tool_name:
+            session.tool_events.append(
+                {
+                    "name": tool_name,
+                    "argument_keys": sorted((tool_arguments or {}).keys()),
+                    "success": False,
+                    "result_preview": compact_text(classification.get("env_error_message") or "", limit=300),
+                }
+            )
+        cls._apply_env_error(session, classification)
+        return session.build_summary()
 
     @staticmethod
     def _update_from_step(
@@ -830,6 +1043,9 @@ class Tau3GymLiveSessionManager:
         simulation_run_payload = to_jsonable(session.info.get("simulation_run") or {})
         session.reward_info_json = _json_string(reward_info_payload)
         session.simulation_run_json = _json_string(simulation_run_payload)
+        classification = classify_tau3_env_error_payload(reward_info_payload, simulation_run_payload, observation)
+        if classification.get("env_error"):
+            Tau3GymLiveSessionManager._apply_env_error(session, classification)
         session.last_action_type = action_type
         session.last_parse_error = parse_error
         if assistant_text:
@@ -859,7 +1075,11 @@ class Tau3GymLiveSessionManager:
                     note_text = str(info_note.get("note", "") or "").lower()
                     if "max_steps" in note_text:
                         simulation_reason = "max_steps"
-            session.terminal_reason = simulation_reason or ("truncated" if truncated else "agent_or_user_stop")
+            session.terminal_reason = (
+                "env_error"
+                if session.env_error
+                else simulation_reason or ("truncated" if truncated else "agent_or_user_stop")
+            )
 
         return session.build_summary()
 
@@ -880,7 +1100,57 @@ class Tau3GymLiveSessionManager:
             summary = session.build_summary()
             return True, "", float(summary["final_reward"]), {"tau3_live_result": summary, "tau3_should_terminate": True}
 
-        observation, reward, terminated, truncated, info = session.env.step(action)
+        max_retries = max(0, _env_int("TAU3_BEDROCK_MAX_RETRIES", 3))
+        retry_step_on_transient = _env_flag("TAU3_RETRY_STEP_ON_TRANSIENT", False)
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                observation, reward, terminated, truncated, info = session.env.step(action)
+                break
+            except Exception as exc:  # pragma: no cover - live Bedrock/tau runtime dependent
+                last_exc = exc
+                classification = classify_tau3_env_error_payload(type(exc).__name__, str(exc))
+                should_retry = retry_step_on_transient and bool(classification.get("bedrock_error")) and attempt < max_retries
+                if should_retry:
+                    session.bedrock_retry_count += 1
+                    _sleep_before_retry(attempt)
+                    continue
+                fallback_step_result = None
+                if retry_step_on_transient and classification.get("bedrock_error") and attempt >= max_retries:
+                    for fallback_model in cls._configured_user_model_fallbacks(session.user_model):
+                        if not cls._try_switch_user_model(session, fallback_model):
+                            continue
+                        try:
+                            session.bedrock_retry_count += 1
+                            fallback_step_result = session.env.step(action)
+                            break
+                        except Exception as fallback_exc:
+                            last_exc = fallback_exc
+                            classification = classify_tau3_env_error_payload(
+                                type(fallback_exc).__name__, str(fallback_exc)
+                            )
+                            continue
+                if fallback_step_result is not None:
+                    observation, reward, terminated, truncated, info = fallback_step_result
+                    break
+                if not classification.get("env_error") and not _env_flag("TAU3_MARK_ENV_EXCEPTIONS", True):
+                    raise
+                summary = cls._mark_step_exception(
+                    session,
+                    exc,
+                    action_type=action_type,
+                    assistant_text=assistant_text,
+                    tool_name=tool_name,
+                    tool_arguments=tool_arguments,
+                    parse_error=parse_error,
+                )
+                return True, "", 0.0, {
+                    "tau3_live_result": summary,
+                    "tau3_should_terminate": True,
+                }
+        else:  # pragma: no cover - loop always breaks or returns
+            raise RuntimeError(f"Tau3 env.step failed without exception state: {last_exc}")
+
         summary = cls._update_from_step(
             session,
             observation=observation,
@@ -894,9 +1164,10 @@ class Tau3GymLiveSessionManager:
             tool_arguments=tool_arguments,
             parse_error=parse_error,
         )
-        return bool(terminated or truncated), observation, float(reward or 0.0), {
+        should_terminate = bool(terminated or truncated or summary.get("env_error"))
+        return should_terminate, observation, float(0.0 if summary.get("env_error") else reward or 0.0), {
             "tau3_live_result": summary,
-            "tau3_should_terminate": bool(terminated or truncated),
+            "tau3_should_terminate": should_terminate,
         }
 
     @classmethod

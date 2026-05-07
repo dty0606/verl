@@ -644,6 +644,16 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - East P5 has only a 99 GB EBS root but large ephemeral NVMe. For east smoke/full SDPO, set `NVME_ROOT=/mnt/sagemaker-nvme/tau3_sdpo` and export `TMPDIR`, `RAY_TMPDIR`, `SDPO_OUTPUT_ROOT`, `SDPO_CHECKPOINT_ROOT`, `LOG_ROOT`, `ROLLOUT_OUTPUT_ROOT`, `WANDB_DIR`, and cache dirs under NVMe. `ROLLOUT_OUTPUT_ROOT` alone is not enough because checkpoints still follow `SDPO_CHECKPOINT_ROOT`.
 - Added `scripts/p5_run_east_original_sdpo_full.sh` for the overnight east-P5 original-SDPO baseline. It assumes `sdpo-vllm20-v1` is active, sets `MODE=sdpo` and `SDPO_ARM=original`, uses profile `02_auto_prefix_24k_48k`, defaults to 300 steps with save/test every 30, keeps at most three actor checkpoints, and routes Ray temp/checkpoints/rollouts/W&B/cache/logs to `/mnt/sagemaker-nvme/tau3_sdpo`.
 
+### 2026-05-07 Tau3 Bedrock env-error guardrails
+
+- GRPO vLLM V1 clean rerun showed Bedrock/LiteLLM `ServiceUnavailableError` bursts around steps 106-135. These are user-simulator infrastructure failures, not actor-policy failures, and should not be treated as ordinary reward-0 Tau3 workflow evidence.
+- Added first-class Tau3 env-error metadata: `env_error`, `bedrock_error`, `env_error_type`, `env_error_message`, `bedrock_retry_count`, and `bedrock_fallback_model` in the official-gym live result.
+- `compute_score` now emits `tau3_live/env_error_fraction`, `tau3_live/bedrock_error_fraction`, `tau3_live/bedrock_retry_count`, `tau3_live/bedrock_fallback_fraction`, and `reward_source=official_gym_env_error`; env-error feedback is suppressed so SDPO does not build teacher prompts from infrastructure failures.
+- Trainer guardrail: env-error samples have `response_mask` and reward zeroed and are moved into singleton GRPO UID groups so they cannot affect actor loss or sibling group baselines. If `TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD` is reached, actor update is skipped for that batch; critic update is also skipped if enabled.
+- SDPO guardrail: env-error rows are excluded from failed-sample teacher construction and logged as `self_distillation/env_error_excluded_fraction`.
+- Launch defaults: `TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'`, `TAU3_MASK_ENV_ERROR_ROLLOUTS=1`, `TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD=0.25`, and `TAU3_RETRY_STEP_ON_TRANSIENT=0`.
+- Rationale for `TAU3_RETRY_STEP_ON_TRANSIENT=0`: replaying outer `env.step(action)` can duplicate transactional writes if the tool state changed before the user-simulator call failed. Prefer retry inside Tau2/LiteLLM user-call handling; the outer layer should mark/mask env errors rather than replay actions.
+
 ## Evidence Carried Forward
 
 From the old repo:
