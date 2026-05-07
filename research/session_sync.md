@@ -584,9 +584,8 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   3. `fp8_no_prefix_24k_48k`
   4. `fp8_prefix_24k_48k`
   5. `fp8_prefix_32k_64k`
-- All current launchers default `TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0`, preserving historical actor `<think>` in the actual chat history while avoiding duplicated full-transcript observations from Tau3 Gym.
+- All current launchers and the official-gym runtime fallback default `TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0`, preserving historical actor `<think>` in the actual chat history while avoiding duplicated full-transcript observations from Tau3 Gym.
 - Stage-2 mitigation work should start with diagnostics-only changes unless explicitly requested otherwise:
-  - runtime fallback default for Tau3 all-messages observations,
   - component token/repetition diagnostics,
   - rollout dump enrichment.
   - Defer length-clipped sample masking until diagnostics confirm it is needed, because it changes the optimization objective.

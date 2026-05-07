@@ -887,7 +887,7 @@ class Tau3GymLiveSessionManager:
             solo_mode=False,
             user_llm=resolved_user_model,
             user_llm_args=user_llm_args or None,
-            all_messages_as_observation=os.environ.get("TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION", "1") != "0",
+            all_messages_as_observation=os.environ.get("TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION", "0") != "0",
         )
         task_split_name = str(task_split or "base")
         if task_split_name != "base":

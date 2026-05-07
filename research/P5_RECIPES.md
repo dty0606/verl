@@ -747,6 +747,7 @@ export HF_CKPT=$(ls -d checkpoints/SDPO/tau3_verl_sft/*/global_step_*/huggingfac
 export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
 export TAU3_LIVE_RUNTIME=official_gym
 export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
+# Runtime fallback also defaults to compact observations, but export this so logs prove it.
 export TAU3_BEDROCK_MAX_RETRIES=3
 export TAU3_BEDROCK_RETRY_DELAYS=15,30,60
 export TAU3_BEDROCK_RETRY_JITTER=0.2
