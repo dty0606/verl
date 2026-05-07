@@ -639,6 +639,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Keep S3 sync region as `us-west-2` for the existing `s3://tianyd-rlvr-research/tau3-sdpo/latest-verl` bucket, but set `AWS_REGION=us-east-1` / `AWS_DEFAULT_REGION=us-east-1` for Bedrock/Tau3 user-simulator calls on east P5.
 - East readiness gates: vLLM V1 preflight, `vllm._C` import, `flash_attn` import, `nvcc`/`cicc` visibility, 3-step GRPO profile `02_auto_prefix_24k_48k`, then 1-step `MODE=sdpo SDPO_ARM=original` smoke before any overnight vanilla-SDPO baseline.
 - East preflight found `cuda_runtime.h` only under Python `site-packages/nvidia/cuda_runtime/include`, not under `$CONDA_PREFIX/targets/x86_64-linux/include`. Root cause is missing CUDA runtime header package; `cuda-cudart` alone did not install headers. Install `cuda-cudart-dev=12.9.79` from `nvidia/label/cuda-12.9.1`, keep `CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"`, and rerun preflight before GRPO smoke.
+- East GDN JIT then progressed one include deeper and failed on `crt/host_config.h`. This is the same FlashInfer/GDN JIT setup family, but a different missing CUDA component: install `cuda-crt=12.9.86`, verify `$CUDA_HOME/include/crt/host_config.h`, clear the failed `~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90` cache, then rerun the 3-step GRPO smoke.
 
 ## Evidence Carried Forward
 

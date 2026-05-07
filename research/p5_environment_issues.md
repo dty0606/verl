@@ -15,7 +15,7 @@ transformers:       5.8.0
 tokenizers:         0.22.2
 ray:                2.55.1
 CUDA driver:        580.126.09 (supports CUDA 13.0)
-CUDA toolkit:       12.9 (conda cuda-nvcc-tools + cuda-nvvm-tools + cuda-cudart-dev)
+CUDA toolkit:       12.9 (conda cuda-nvcc-tools + cuda-nvvm-tools + cuda-cudart-dev + cuda-crt)
 GPU:                8× NVIDIA H100 80GB HBM3
 VLLM_USE_V1:       1
 ```
@@ -43,6 +43,7 @@ conda install -n sdpo-vllm20-v1 -y \
   cuda-nvcc-tools=12.9.86 \
   cuda-nvvm-tools=12.9.86 \
   cuda-cudart-dev=12.9.79 \
+  cuda-crt=12.9.86 \
   --no-update-deps
 ```
 
@@ -165,6 +166,23 @@ conda install -n sdpo-vllm20-v1 -y -c nvidia/label/cuda-12.9.1 \
   cuda-cudart-dev=12.9.79 --no-update-deps
 export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
 ls "$CUDA_HOME/include/cuda_runtime.h"
+```
+
+### 4b. FlashInfer GDN kernel JIT fails: `crt/host_config.h: No such file or directory`
+
+**Symptom:** `cuda_runtime.h:82:10: fatal error: crt/host_config.h: No such file or directory`
+
+**Root cause:** `cuda_runtime.h` is present, but the CUDA CRT internal header
+package is missing. This is the next layer of the same FlashInfer/GDN JIT setup
+problem, not a Qwen/vLLM algorithm issue.
+
+**Fix:**
+```bash
+conda install -n sdpo-vllm20-v1 -y -c nvidia/label/cuda-12.9.1 \
+  cuda-crt=12.9.86 --no-update-deps
+export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
+ls "$CUDA_HOME/include/crt/host_config.h"
+rm -rf ~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90
 ```
 
 ### 5. flash-attn build from source fails (no nvcc / incomplete toolkit)
