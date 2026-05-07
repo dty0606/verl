@@ -246,6 +246,11 @@ export TAU3_LIVE_FEEDBACK_FORMAT=json
 
 If setup prints `WARN: uv does not expose --torch-backend`, it should fall back to the `https://wheels.vllm.ai/0.20.1/cu129` wheel index. Treat the env as suspect until preflight proves `vllm._C`, Torch CUDA, and the vLLM version. If setup cannot find `cuda_runtime.h`, `crt/host_config.h`, `fatbinary_section.h`, `nvcc`, or `cicc`, fix the CUDA/NVVM env before full runs; FlashInfer/GDN JIT depends on those pieces for Qwen3.5 linear-attention kernels. `cuda-cudart` alone may not install headers on SM CE; install `cuda-cudart-dev=12.9.79` if `cuda_runtime.h` is missing, `cuda-crt=12.9.86` plus `cuda-crt-dev_linux-64=12.9.86` if `crt/host_config.h` is missing, and `cuda-nvcc-dev_linux-64=12.9.86` plus `cuda-nvvm-dev_linux-64=12.9.86` if `fatbinary_section.h` or other NVCC internal headers are missing.
 
+East P5 confirmation: the final missing-header ladder was
+`cuda_runtime.h` -> `crt/host_config.h` -> `fatbinary_section.h`. Installing
+the CUDA dev packages above and clearing the FlashInfer cache fixed the GDN JIT
+startup path on the east instance.
+
 ## Verify Inputs
 
 ```bash

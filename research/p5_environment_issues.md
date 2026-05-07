@@ -191,6 +191,9 @@ rm -rf ~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90
 
 ### 4c. FlashInfer GDN kernel JIT fails: `fatbinary_section.h: No such file or directory`
 
+**Status:** Confirmed fixed on east P5 after installing the NVCC/NVVM/CRT dev
+header packages and clearing the failed FlashInfer GDN cache.
+
 **Symptom:** `fatal error: fatbinary_section.h: No such file or directory`
 during `nvcc` compilation of FlashInfer GDN prefill kernels.
 
