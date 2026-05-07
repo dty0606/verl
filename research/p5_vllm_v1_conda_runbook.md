@@ -157,11 +157,13 @@ The profile order is:
 
 1. `01_auto_no_prefix_24k_48k`
 2. `02_auto_prefix_24k_48k`
-3. `03_fp8_no_prefix_24k_48k`
-4. `04_fp8_prefix_24k_48k`
-5. `05_fp8_prefix_32k_64k`
+3. `03_fp8_no_prefix_noscales_24k_48k`
+4. `04_fp8_prefix_noscales_24k_48k`
+5. `05_fp8_prefix_noscales_32k_64k`
 
 The capacity matrix defaults to `TRAIN_BATCH_SIZE=8`, `ROLLOUT_BATCH_SIZE=8`, and `PPO_MINI_BATCH_SIZE=8` so the real train batch is divisible by 8 P5 GPUs. Do not lower those values on 8-GPU P5 unless you also change the GPU count/config coherently.
+
+The default FP8 profiles intentionally use `VLLM_CALCULATE_KV_SCALES=false`. On Qwen3.5 hybrid attention/linear-attention models, vLLM 0.20.1 can crash during dynamic FP8 KV scale initialization because some hybrid cache entries are lists rather than tensors. Only run the dynamic-scale variants with `RUN_EXPERIMENTAL_FP8_SCALES=1` after the no-scale FP8 profiles pass.
 
 The environment is ready for overnight experiments only after at least one GRPO smoke completes 2-3 training steps without ABI errors, FlashInfer/GDN CUDA-header errors, hybrid-KV page-size errors, parser/tool-call regressions, Bedrock access failures, or disk-pressure checkpoint errors.
 

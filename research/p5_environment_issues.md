@@ -172,18 +172,18 @@ pip install --no-deps \
   "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 ```
 
-### 6. vLLM 0.20.x hybrid KV page-size error (RESOLVED by disabling prefix caching)
+### 6. vLLM 0.20.x hybrid KV page-size error (resolved in smoke by latest setup)
 
 **Symptom:** `NotImplementedError: The page size of the layer is not divisible by the maximum page size`
 
 **Root cause:** Qwen3.5 has mixed attention/linear-attention layers with different KV cache page sizes. vLLM V1's prefix caching tries to unify them.
 
-**Fix:** Disable prefix caching:
+**Initial fix:** Disable prefix caching:
 ```bash
 export VLLM_ENABLE_PREFIX_CACHING=false
 ```
 
-**Status:** Profile 01 (auto KV, no prefix caching) PASSED. Profile 02 (with prefix caching) is being tested.
+**Status:** Profile 01 (auto KV, no prefix caching) PASSED. Profile 02 (auto KV, prefix caching) also PASSED in the latest west-P5 capacity matrix.
 
 ### 7. FlashAttention2 not installed (FSDP actor model loading)
 
@@ -238,12 +238,27 @@ To fully fix GDN JIT before full runs:
 - Use `source activate <env>` not `conda activate <env>`
 - conda deactivation hooks may fail with `set -u` (unbound CONDA_BACKUP_CXX)
 
+### 11. FP8 KV dynamic-scale initialization fails on Qwen3.5 hybrid cache
+
+**Symptom:** `AttributeError: 'list' object has no attribute 'zero_'` in `gpu_model_runner.py:init_fp8_kv_scales`.
+
+**Root cause:** vLLM 0.20.1 dynamic FP8 KV scale initialization assumes each cache entry is a tensor. Qwen3.5 hybrid attention/linear-attention cache entries can include list-shaped recurrent/GDN state, so `calculate_kv_scales=true` crashes during vLLM wake-up.
+
+**Fix:** First test FP8 KV without dynamic scale calculation:
+```bash
+export VLLM_KV_CACHE_DTYPE=fp8
+export VLLM_CALCULATE_KV_SCALES=false
+```
+
+The capacity matrix now defaults FP8 profiles to `calculate_kv_scales=false`. Dynamic scale variants are opt-in only with `RUN_EXPERIMENTAL_FP8_SCALES=1`.
+
 ## Capacity Matrix Results (West P5, 2026-05-07)
 
 | Profile | KV dtype | Prefix cache | Response/Model len | Status |
 |---------|----------|-------------|-------------------|--------|
 | 01_auto_no_prefix_24k_48k | auto | off | 24K/48K | **PASS** ✅ |
 | 02_auto_prefix_24k_48k | auto | on | 24K/48K | running... |
-| 03_fp8_no_prefix_24k_48k | fp8 | off | 24K/48K | pending |
-| 04_fp8_prefix_24k_48k | fp8 | on | 24K/48K | pending |
-| 05_fp8_prefix_32k_64k | fp8 | on | 32K/64K | pending |
+| 03_fp8_no_prefix_calcscales_24k_48k | fp8 | off | 24K/48K | FAIL (`init_fp8_kv_scales` list cache bug) |
+| 03_fp8_no_prefix_noscales_24k_48k | fp8 | off | 24K/48K | needs test |
+| 04_fp8_prefix_noscales_24k_48k | fp8 | on | 24K/48K | needs test |
+| 05_fp8_prefix_noscales_32k_64k | fp8 | on | 32K/64K | needs test |

@@ -4,9 +4,10 @@
 # This script is intentionally ordered from safest to most aggressive:
 #   1. BF16/auto KV, prefix caching disabled.
 #   2. BF16/auto KV, prefix caching enabled.
-#   3. FP8 KV, prefix caching disabled.
-#   4. FP8 KV, prefix caching enabled.
-#   5. FP8 KV, prefix caching enabled, 64K model length.
+#   3. FP8 KV, prefix caching disabled, dynamic scale calculation disabled.
+#   4. FP8 KV, prefix caching enabled, dynamic scale calculation disabled.
+#   5. FP8 KV, prefix caching enabled, 64K model length, dynamic scale
+#      calculation disabled.
 #
 # Use this after activating the candidate latest-VERL + vLLM V1 conda env.
 
@@ -19,6 +20,7 @@ MODEL_PATH="${MODEL_PATH:-}"
 MODE="${MODE:-grpo}" # grpo or sdpo
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-1}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_ROOT/logs/vllm_v1_capacity_matrix/$(date +%Y%m%d_%H%M%S)}"
+RUN_EXPERIMENTAL_FP8_SCALES="${RUN_EXPERIMENTAL_FP8_SCALES:-0}"
 
 if [ -z "$MODEL_PATH" ]; then
     echo "Error: MODEL_PATH must point to the SFT HF checkpoint." >&2
@@ -130,9 +132,14 @@ run_or_record() {
 
 run_or_record "01_auto_no_prefix_24k_48k" 24576 49152 false auto false
 run_or_record "02_auto_prefix_24k_48k" 24576 49152 true auto false
-run_or_record "03_fp8_no_prefix_24k_48k" 24576 49152 false fp8 true
-run_or_record "04_fp8_prefix_24k_48k" 24576 49152 true fp8 true
-run_or_record "05_fp8_prefix_32k_64k" 32768 65536 true fp8 true
+run_or_record "03_fp8_no_prefix_noscales_24k_48k" 24576 49152 false fp8 false
+run_or_record "04_fp8_prefix_noscales_24k_48k" 24576 49152 true fp8 false
+run_or_record "05_fp8_prefix_noscales_32k_64k" 32768 65536 true fp8 false
+
+if [ "$RUN_EXPERIMENTAL_FP8_SCALES" = "1" ]; then
+    run_or_record "90_fp8_no_prefix_calcscales_24k_48k" 24576 49152 false fp8 true
+    run_or_record "91_fp8_prefix_calcscales_24k_48k" 24576 49152 true fp8 true
+fi
 
 echo "----------------------------------------------------------------"
 echo "Capacity matrix complete. Summary:"

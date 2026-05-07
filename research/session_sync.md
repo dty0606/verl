@@ -611,6 +611,16 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - `research/p5_vllm_v1_conda_runbook.md` now requires flash-attn import plus `nvcc`/`cicc` visibility before full runs.
 - QA stance: a GDN JIT failure can be tolerated only for a tiny smoke if the profile completes. Do not start overnight GRPO/SDPO until GDN is fixed or the passing profile is explicitly documented as stable enough despite the warning.
 
+### 2026-05-07 FP8 KV cache follow-up
+
+- West-P5 capacity matrix showed:
+  - `01_auto_no_prefix_24k_48k`: PASS.
+  - `02_auto_prefix_24k_48k`: PASS.
+  - FP8 with `VLLM_CALCULATE_KV_SCALES=true`: FAIL with `AttributeError: 'list' object has no attribute 'zero_'` inside vLLM `init_fp8_kv_scales`.
+- Interpretation: the failure is likely dynamic FP8 KV scale initialization on Qwen3.5's hybrid attention/linear-attention cache, not necessarily FP8 KV storage itself.
+- Updated `scripts/p5_run_vllm_v1_capacity_matrix.sh` so default FP8 profiles use `VLLM_CALCULATE_KV_SCALES=false`. Dynamic-scale FP8 profiles are opt-in with `RUN_EXPERIMENTAL_FP8_SCALES=1`.
+- Main overnight baseline recommendation remains auto KV + prefix caching unless no-scale FP8 passes and a short fixed-task comparison shows no quality regression.
+
 ## Evidence Carried Forward
 
 From the old repo:
