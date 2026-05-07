@@ -17,6 +17,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import re
 import sys
 import tarfile
 import time
@@ -63,6 +64,9 @@ class MemoryUnit:
 class QuerySample:
     query_id: str
     text: str
+    query_mode: str
+    parts: dict[str, str]
+    part_lengths: dict[str, int]
     metadata: dict[str, Any]
     tokens: set[str]
 
@@ -198,6 +202,13 @@ def output_text(row: dict[str, Any]) -> str:
     return ""
 
 
+def clipped_part(text: str, *, max_chars: int) -> str:
+    text = str(text or "")
+    if max_chars <= 0:
+        return ""
+    return text[:max_chars]
+
+
 def read_json_payload(text: str, source_file: str) -> Iterable[JsonRow]:
     text = text.strip()
     if not text:
@@ -260,6 +271,35 @@ def maybe_strip_thinking(text: str, *, keep_thinking: bool) -> str:
     return str(text or "") if keep_thinking else strip_thinking(text)
 
 
+def remove_prompt_boilerplate(text: str) -> str:
+    """Drop obvious system/tool-schema boilerplate from a prompt tail.
+
+    This is intentionally conservative. It is only for retrieval-query audits,
+    not training-time prompt construction.
+    """
+
+    kept_lines: list[str] = []
+    for line in str(text or "").splitlines():
+        lowered = line.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                "you are an airline customer service agent",
+                "available tools",
+                "tool schema",
+                "\"type\": \"function\"",
+                "\"parameters\"",
+                "<tools>",
+                "</tools>",
+                "# tools",
+            )
+        ):
+            continue
+        kept_lines.append(line)
+    compact = "\n".join(kept_lines).strip()
+    return compact or str(text or "")
+
+
 def chunk_text(text: str, *, chunk_chars: int, overlap_chars: int, keep_thinking: bool) -> list[str]:
     text = maybe_strip_thinking(text, keep_thinking=keep_thinking)
     if not text:
@@ -318,8 +358,18 @@ def build_query_samples(
     include_suspicious: bool,
     include_env_errors: bool,
     keep_thinking_in_query: bool,
+    query_mode: str,
 ) -> list[QuerySample]:
     samples: list[QuerySample] = []
+    valid_query_modes = {
+        "current",
+        "feedback_only",
+        "failed_output_only",
+        "prompt_tail_only",
+        "prompt_tail_no_schema",
+    }
+    if query_mode not in valid_query_modes:
+        raise ValueError(f"Unsupported query mode: {query_mode}. Expected one of {sorted(valid_query_modes)}")
     for item in rows:
         row = item.row
         if row_score(row) >= failure_threshold:
@@ -330,17 +380,27 @@ def build_query_samples(
         if not include_suspicious and looks_suspicious(out):
             continue
         feedback = get_feedback(row)
-        prompt_tail = input_text(row)[-prompt_tail_chars:]
+        prompt = input_text(row)
+        prompt_tail = prompt[-prompt_tail_chars:]
+        prompt_tail_no_schema = remove_prompt_boilerplate(prompt_tail)
         failed_output = maybe_strip_thinking(out, keep_thinking=keep_thinking_in_query)
-        query_text = "\n\n".join(
-            part
-            for part in (
-                feedback,
-                failed_output[:failed_response_chars],
-                prompt_tail,
-            )
-            if part
-        )
+        parts = {
+            "feedback": clipped_part(feedback, max_chars=12_000),
+            "failed_output": clipped_part(failed_output, max_chars=failed_response_chars),
+            "prompt_tail": clipped_part(prompt_tail, max_chars=prompt_tail_chars),
+            "prompt_tail_no_schema": clipped_part(prompt_tail_no_schema, max_chars=prompt_tail_chars),
+        }
+        if query_mode == "current":
+            selected_parts = ("feedback", "failed_output", "prompt_tail")
+        elif query_mode == "feedback_only":
+            selected_parts = ("feedback",)
+        elif query_mode == "failed_output_only":
+            selected_parts = ("failed_output",)
+        elif query_mode == "prompt_tail_only":
+            selected_parts = ("prompt_tail",)
+        elif query_mode == "prompt_tail_no_schema":
+            selected_parts = ("prompt_tail_no_schema",)
+        query_text = "\n\n".join(parts[key] for key in selected_parts if parts[key])
         if not query_text:
             continue
         query_id = f"{Path(item.source_file).name}:{item.source_index}"
@@ -359,6 +419,9 @@ def build_query_samples(
             QuerySample(
                 query_id=query_id,
                 text=query_text,
+                query_mode=query_mode,
+                parts={key: value for key, value in parts.items() if value},
+                part_lengths={key: len(value) for key, value in parts.items()},
                 metadata=metadata,
                 tokens=set(tokens_for_lexical(query_text)),
             )
@@ -514,6 +577,36 @@ def compatible(query: QuerySample, memory: MemoryUnit, *, block_same_task_id: bo
     return True
 
 
+def passes_memory_text_filters(
+    memory: MemoryUnit,
+    *,
+    exclude_regex: re.Pattern[str] | None,
+    require_regex: re.Pattern[str] | None,
+    exclude_generic_opening: bool,
+) -> bool:
+    text = f"{memory.memory_id}\n{memory.unit_type}\n{memory.text}\n{memory.display_text}"
+    if exclude_regex and exclude_regex.search(text):
+        return False
+    if require_regex and not require_regex.search(text):
+        return False
+    if exclude_generic_opening and memory.unit_type in {"event_chunk", "char_chunk"}:
+        lowered = memory.text.lower()
+        action_markers = (
+            "book_reservation",
+            "update_reservation",
+            "cancel_reservation",
+            "transfer_to_human_agents",
+            "search_direct_flight",
+            "search_onestop_flight",
+        )
+        generic_markers = ("get_user_details", "get_reservation_details")
+        has_action = any(marker in lowered for marker in action_markers)
+        only_generic = any(marker in lowered for marker in generic_markers) and not has_action
+        if only_generic:
+            return False
+    return True
+
+
 def topk_by_scores(
     query: QuerySample,
     memory_units: list[MemoryUnit],
@@ -522,10 +615,18 @@ def topk_by_scores(
     top_k: int,
     block_same_task_id: bool,
     block_same_uid: bool,
+    exclude_regex: re.Pattern[str] | None,
+    require_regex: re.Pattern[str] | None,
+    exclude_generic_opening: bool,
 ) -> list[dict[str, Any]]:
     ranked: list[tuple[float, MemoryUnit]] = []
     for score, memory in zip(scores, memory_units, strict=True):
-        if compatible(query, memory, block_same_task_id=block_same_task_id, block_same_uid=block_same_uid):
+        if compatible(query, memory, block_same_task_id=block_same_task_id, block_same_uid=block_same_uid) and passes_memory_text_filters(
+            memory,
+            exclude_regex=exclude_regex,
+            require_regex=require_regex,
+            exclude_generic_opening=exclude_generic_opening,
+        ):
             ranked.append((score, memory))
     ranked.sort(key=lambda item: (item[0], item[1].memory_id), reverse=True)
     results: list[dict[str, Any]] = []
@@ -749,6 +850,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--success-threshold", type=float, default=1.0)
     parser.add_argument("--failed-response-chars", type=int, default=1600)
     parser.add_argument("--prompt-tail-chars", type=int, default=2400)
+    parser.add_argument(
+        "--query-mode",
+        choices=("current", "feedback_only", "failed_output_only", "prompt_tail_only", "prompt_tail_no_schema"),
+        default="current",
+        help="Which parts form retrieval queries. Defaults to the legacy current mode.",
+    )
     parser.add_argument("--max-card-chars", type=int, default=2200)
     parser.add_argument("--max-memory-chars", type=int, default=12000)
     parser.add_argument("--chunk-chars", type=int, default=3000)
@@ -767,6 +874,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--block-same-task-id", action="store_true")
     parser.add_argument("--block-same-uid", action="store_true")
+    parser.add_argument(
+        "--exclude-memory-regex",
+        default="",
+        help="Regex over memory id/type/text/preview to exclude generic or unsafe memory units.",
+    )
+    parser.add_argument(
+        "--require-memory-regex",
+        default="",
+        help="Regex over memory id/type/text/preview; memory units must match if set.",
+    )
+    parser.add_argument(
+        "--exclude-generic-opening-memory",
+        action="store_true",
+        help="Drop event/char chunks that only contain generic get_user/get_reservation reads and no action/search/write tool.",
+    )
+    parser.add_argument("--query-preview-chars", type=int, default=700)
     parser.add_argument("--embedding-cache", default="", help="Optional JSONL embedding cache.")
     parser.add_argument("--hf-model", default="BAAI/bge-small-en-v1.5")
     parser.add_argument("--hf-device", default="cpu")
@@ -793,6 +916,8 @@ def main() -> int:
         if memory_rollout_paths:
             memory_unit_types.add("full_trajectory")
     backends = args.backend or ["random", "lexical"]
+    exclude_memory_regex = re.compile(args.exclude_memory_regex, flags=re.IGNORECASE | re.DOTALL) if args.exclude_memory_regex else None
+    require_memory_regex = re.compile(args.require_memory_regex, flags=re.IGNORECASE | re.DOTALL) if args.require_memory_regex else None
 
     timings: dict[str, Any] = {}
     t0 = time.perf_counter()
@@ -812,6 +937,7 @@ def main() -> int:
         include_suspicious=args.include_suspicious,
         include_env_errors=args.include_env_errors,
         keep_thinking_in_query=args.keep_thinking_in_query,
+        query_mode=args.query_mode,
     )
     memory_units: list[MemoryUnit] = []
     if "cards" in memory_unit_types:
@@ -844,6 +970,24 @@ def main() -> int:
     cache = EmbeddingCache(cache_path)
     rows: list[dict[str, Any]] = []
 
+    def result_row(query: QuerySample, backend: str, top_k_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "query_id": query.query_id,
+            "backend": backend,
+            "query_mode": query.query_mode,
+            "query_metadata": query.metadata,
+            "query_hash": stable_hash(query.text),
+            "query_chars": len(query.text),
+            "query_token_count": len(query.tokens),
+            "query_part_lengths": query.part_lengths,
+            "query_preview": query.text[: args.query_preview_chars],
+            "query_part_previews": {
+                key: value[: args.query_preview_chars]
+                for key, value in query.parts.items()
+            },
+            "top_k": top_k_rows,
+        }
+
     dense_backend_objects: dict[str, Any] = {}
     for backend in backends:
         t_backend = time.perf_counter()
@@ -851,37 +995,41 @@ def main() -> int:
             for query in queries:
                 scores = [stable_random_score(query.query_id, memory.memory_id) for memory in memory_units]
                 rows.append(
-                    {
-                        "query_id": query.query_id,
-                        "backend": backend,
-                        "query_metadata": query.metadata,
-                        "top_k": topk_by_scores(
+                    result_row(
+                        query,
+                        backend,
+                        topk_by_scores(
                             query,
                             memory_units,
                             scores,
                             top_k=args.top_k,
                             block_same_task_id=args.block_same_task_id,
                             block_same_uid=args.block_same_uid,
+                            exclude_regex=exclude_memory_regex,
+                            require_regex=require_memory_regex,
+                            exclude_generic_opening=args.exclude_generic_opening_memory,
                         ),
-                    }
+                    )
                 )
         elif backend == "lexical":
             for query in queries:
                 scores = [lexical_score(query, memory) for memory in memory_units]
                 rows.append(
-                    {
-                        "query_id": query.query_id,
-                        "backend": backend,
-                        "query_metadata": query.metadata,
-                        "top_k": topk_by_scores(
+                    result_row(
+                        query,
+                        backend,
+                        topk_by_scores(
                             query,
                             memory_units,
                             scores,
                             top_k=args.top_k,
                             block_same_task_id=args.block_same_task_id,
                             block_same_uid=args.block_same_uid,
+                            exclude_regex=exclude_memory_regex,
+                            require_regex=require_memory_regex,
+                            exclude_generic_opening=args.exclude_generic_opening_memory,
                         ),
-                    }
+                    )
                 )
         elif backend == "dense_hf":
             dense_backend_objects[backend] = DenseHFBackend(
@@ -901,19 +1049,21 @@ def main() -> int:
             timings["dense_hf_search_seconds"] = time.perf_counter() - t_search
             for query, scores in zip(queries, scores_by_query, strict=True):
                 rows.append(
-                    {
-                        "query_id": query.query_id,
-                        "backend": backend,
-                        "query_metadata": query.metadata,
-                        "top_k": topk_by_scores(
+                    result_row(
+                        query,
+                        backend,
+                        topk_by_scores(
                             query,
                             memory_units,
                             scores,
                             top_k=args.top_k,
                             block_same_task_id=args.block_same_task_id,
                             block_same_uid=args.block_same_uid,
+                            exclude_regex=exclude_memory_regex,
+                            require_regex=require_memory_regex,
+                            exclude_generic_opening=args.exclude_generic_opening_memory,
                         ),
-                    }
+                    )
                 )
         elif backend == "bedrock_titan":
             dense_backend_objects[backend] = BedrockTitanBackend(
@@ -936,19 +1086,21 @@ def main() -> int:
             timings["bedrock_titan_search_seconds"] = time.perf_counter() - t_search
             for query, scores in zip(queries, scores_by_query, strict=True):
                 rows.append(
-                    {
-                        "query_id": query.query_id,
-                        "backend": backend,
-                        "query_metadata": query.metadata,
-                        "top_k": topk_by_scores(
+                    result_row(
+                        query,
+                        backend,
+                        topk_by_scores(
                             query,
                             memory_units,
                             scores,
                             top_k=args.top_k,
                             block_same_task_id=args.block_same_task_id,
                             block_same_uid=args.block_same_uid,
+                            exclude_regex=exclude_memory_regex,
+                            require_regex=require_memory_regex,
+                            exclude_generic_opening=args.exclude_generic_opening_memory,
                         ),
-                    }
+                    )
                 )
         else:
             raise ValueError(f"Unsupported backend: {backend}")
@@ -973,6 +1125,12 @@ def main() -> int:
     summary["thinking_policy"] = {
         "keep_thinking_in_query": bool(args.keep_thinking_in_query),
         "keep_thinking_in_memory": bool(args.keep_thinking_in_memory),
+    }
+    summary["query_mode"] = args.query_mode
+    summary["memory_filters"] = {
+        "exclude_memory_regex": args.exclude_memory_regex,
+        "require_memory_regex": args.require_memory_regex,
+        "exclude_generic_opening_memory": bool(args.exclude_generic_opening_memory),
     }
 
     summary_path = Path(args.summary_json).expanduser() if args.summary_json else output_path.with_suffix(".summary.json")

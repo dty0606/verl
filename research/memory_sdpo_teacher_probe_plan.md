@@ -117,6 +117,30 @@ Use dense retrieval as a probe first. Do not put dense retrieval in the live
 training hot path until the audit shows acceptable query-embedding latency and
 relevant memory beats random memory in the teacher-quality probe.
 
+If lexical or dense retrieval collapses onto one generic trajectory/chunk, first
+debug query construction rather than swapping in a larger embedding model. The
+audit script now emits `query_preview`, `query_part_lengths`, `query_hash`, and
+`query_mode`. Re-run the same source set with:
+
+```bash
+--query-mode feedback_only
+--query-mode prompt_tail_only
+--query-mode prompt_tail_no_schema
+```
+
+and compare top-1 concentration and score margins. To avoid generic opening
+chunks dominating retrieval, use:
+
+```bash
+--exclude-generic-opening-memory
+```
+
+or an explicit regex filter such as:
+
+```bash
+--require-memory-regex "book_reservation|update_reservation|cancel_reservation|transfer_to_human_agents|search_direct_flight|search_onestop_flight"
+```
+
 ## Offline Prompt Builder
 
 Build prompt variants from pulled rollout JSONLs:
