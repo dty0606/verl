@@ -626,6 +626,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Added `CAPACITY_PROFILES` to `scripts/p5_run_vllm_v1_capacity_matrix.sh` so Kiro/P5 can run only the known-good profile instead of the full capacity matrix.
 - Final readiness profile for clean GRPO rerun: `CAPACITY_PROFILES="02_auto_prefix_24k_48k"`, `VLLM_KV_CACHE_DTYPE=auto`, `VLLM_ENABLE_PREFIX_CACHING=true`, `TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0`, `MAX_RESPONSE_LENGTH=24576`, `MAX_MODEL_LEN=49152`, and 8/8/8 batch sizes.
 - `research/P5_RECIPES.md` now contains `Recipe 8A: Ten-Step vLLM V1 GRPO Readiness Smoke`; use it as the last gate before increasing `TOTAL_TRAINING_STEPS` for the full rerun.
+- Added `scripts/tau3/bundle_grpo_readiness_from_p5.sh` and `scripts/tau3/analyze_grpo_smoke_bundle.py` so the passing 10-step smoke can be packaged from P5 with logs, rollout JSONLs, W&B metadata, runtime snapshot, and transcript/repetition heuristics.
 
 ## Evidence Carried Forward
 

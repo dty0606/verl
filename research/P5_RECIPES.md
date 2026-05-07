@@ -906,6 +906,25 @@ Stop criteria:
 If this passes, the next longer GRPO run should keep the same profile and only
 change `TOTAL_TRAINING_STEPS`, `TEST_FREQ`, `SAVE_FREQ`, and the run name.
 
+After a passing smoke, bundle the evidence for Codex/Pro review:
+
+```bash
+SMOKE_NAME=grpo_vllm_v1_readiness_10step \
+PROFILE_NAME=02_auto_prefix_24k_48k \
+LOG_FILE=logs/grpo_vllm_v1_readiness_10step.log \
+bash scripts/tau3/bundle_grpo_readiness_from_p5.sh
+```
+
+This uploads
+`s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/diagnostics/grpo_vllm_v1_readiness_10step_bundle.tgz`
+when the AWS CLI is available on P5. The bundle includes the smoke log, profile
+log, preflight, summary, rollout JSONLs, W&B metadata when present, and a
+heuristic analysis summary.
+
+If Kiro also needs the raw local W&B run directory for deeper scalar-history
+recovery, add `INCLUDE_WANDB_DIR=1` to the bundle command. Keep it off by
+default so the normal diagnostics bundle stays small.
+
 ---
 
 ## Recipe 9: One-Step Vanilla SDPO Smoke
