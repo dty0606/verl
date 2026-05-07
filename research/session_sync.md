@@ -658,6 +658,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - New utility: `verl/utils/tau3_sdpo_memory.py` loads compact JSONL/JSON cards, strips raw `<think>`, and retrieves either `relevant` or `random` cards.
 - Seed card bank: `research/memory_cards/tau3_airline_seed_cards.jsonl`.
 - Offline prompt builder: `scripts/tau3/build_sdpo_memory_teacher_probe.py`.
+- Retrieval audit scaffold: `scripts/tau3/audit_sdpo_memory_retrieval.py` compares `random`, `lexical`, optional `dense_hf`, and optional `bedrock_titan` retrieval over seed cards and/or successful rollout memories. It supports `full_trajectory`, `event_chunk`, and `char_chunk` memory units, emits top-k retrieval JSONL plus timing summary JSON, and is offline-only for now.
 - Live toggles:
   - `SDPO_MEMORY_ENABLED=true`
   - `SDPO_MEMORY_PATH=research/memory_cards/tau3_airline_seed_cards.jsonl`
@@ -666,6 +667,8 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - `SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK=false`
 - New W&B metrics include `self_distillation/memory_used_fraction`, `memory_random_used_fraction`, `memory_no_solution_used_fraction`, and `memory_section_char_mean`.
 - Recommended next step before a full Memory-SDPO run: build T0/T1/T2 teacher probe prompts from failed rollout JSONLs, run a separate teacher-output scoring/manual rubric pass, and verify relevant memory beats random memory on teacher next-action quality.
+- Recommended retrieval order: first audit seed cards plus successful raw trajectories/chunks with `random` and `lexical`; then add `dense_hf` CPU or `bedrock_titan` with an embedding cache. Do not wire dense retrieval into live SDPO until latency and retrieval relevance are measured.
+- Retrieval audit has a dedicated CPU test file: `tests/utils/test_tau3_sdpo_memory_retrieval_audit.py`.
 - Rationale for `TAU3_RETRY_STEP_ON_TRANSIENT=0`: replaying outer `env.step(action)` can duplicate transactional writes if the tool state changed before the user-simulator call failed. Prefer retry inside Tau2/LiteLLM user-call handling; the outer layer should mark/mask env errors rather than replay actions.
 
 ## Evidence Carried Forward
