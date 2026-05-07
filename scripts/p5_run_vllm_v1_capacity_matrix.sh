@@ -19,8 +19,28 @@ TASK_DIR="$PROJECT_ROOT/${TASK_PATH#./}"
 MODEL_PATH="${MODEL_PATH:-}"
 MODE="${MODE:-grpo}" # grpo or sdpo
 CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-1}"
-LOG_ROOT="${LOG_ROOT:-$PROJECT_ROOT/logs/vllm_v1_capacity_matrix/$(date +%Y%m%d_%H%M%S)}"
-ROLLOUT_OUTPUT_ROOT="${ROLLOUT_OUTPUT_ROOT:-$PROJECT_ROOT/outputs/vllm_v1_capacity_matrix}"
+if [ -z "${NVME_ROOT:-}" ] && [ -d /mnt/sagemaker-nvme ]; then
+    export NVME_ROOT=/mnt/sagemaker-nvme/tau3_sdpo
+fi
+if [ -n "${NVME_ROOT:-}" ]; then
+    mkdir -p "$NVME_ROOT"/{tmp,ray_tmp,logs,outputs,output,checkpoints,wandb,cache}
+    export TMPDIR="${TMPDIR:-$NVME_ROOT/tmp}"
+    export TMP="${TMP:-$TMPDIR}"
+    export TEMP="${TEMP:-$TMPDIR}"
+    export RAY_TMPDIR="${RAY_TMPDIR:-$NVME_ROOT/ray_tmp}"
+    export SDPO_OUTPUT_ROOT="${SDPO_OUTPUT_ROOT:-$NVME_ROOT/output/SDPO}"
+    export SDPO_CHECKPOINT_ROOT="${SDPO_CHECKPOINT_ROOT:-$NVME_ROOT/checkpoints/SDPO}"
+    export WANDB_DIR="${WANDB_DIR:-$NVME_ROOT/wandb}"
+    export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$NVME_ROOT/cache/wandb}"
+    export HF_HOME="${HF_HOME:-$NVME_ROOT/cache/huggingface}"
+    export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+    export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/transformers}"
+    export TORCH_HOME="${TORCH_HOME:-$NVME_ROOT/cache/torch}"
+    export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$NVME_ROOT/cache/triton}"
+    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$NVME_ROOT/cache/xdg}"
+fi
+LOG_ROOT="${LOG_ROOT:-${NVME_ROOT:-$PROJECT_ROOT}/logs/vllm_v1_capacity_matrix/$(date +%Y%m%d_%H%M%S)}"
+ROLLOUT_OUTPUT_ROOT="${ROLLOUT_OUTPUT_ROOT:-${NVME_ROOT:-$PROJECT_ROOT}/outputs/vllm_v1_capacity_matrix}"
 RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-vllm_v1}"
 RUN_EXPERIMENTAL_FP8_SCALES="${RUN_EXPERIMENTAL_FP8_SCALES:-0}"
 CAPACITY_PROFILES="${CAPACITY_PROFILES:-all}"
@@ -44,6 +64,17 @@ if [ ! -f "$TASK_DIR/train.parquet" ] || [ ! -f "$TASK_DIR/test.parquet" ]; then
 fi
 
 mkdir -p "$LOG_ROOT"
+
+if command -v df >/dev/null 2>&1; then
+    overlay_avail_kb=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}')
+    min_overlay_avail_kb=$(( ${MIN_OVERLAY_FREE_GB:-2} * 1024 * 1024 ))
+    if [ -n "${overlay_avail_kb:-}" ] && [ "$overlay_avail_kb" -lt "$min_overlay_avail_kb" ]; then
+        echo "Error: container root '/' has less than ${MIN_OVERLAY_FREE_GB:-2}GB free." >&2
+        echo "Clean /tmp or other overlay-backed paths before launching, then rerun." >&2
+        df -h / >&2 || true
+        exit 1
+    fi
+fi
 
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export MODEL_PATH
@@ -84,8 +115,13 @@ echo "Project root: $PROJECT_ROOT"
 echo "Task dir: $TASK_DIR"
 echo "Model path: $MODEL_PATH"
 echo "Mode: $MODE"
+echo "NVME root: ${NVME_ROOT:-<unset>}"
 echo "Log root: $LOG_ROOT"
 echo "Rollout output root: $ROLLOUT_OUTPUT_ROOT"
+echo "Checkpoint root: ${SDPO_CHECKPOINT_ROOT:-<default>}"
+echo "W&B dir: ${WANDB_DIR:-<default>}"
+echo "Ray tmp: ${RAY_TMPDIR:-<default>}"
+echo "TMPDIR: ${TMPDIR:-<default>}"
 echo "Run name prefix: $RUN_NAME_PREFIX"
 echo "Capacity profiles: $CAPACITY_PROFILES"
 echo "VLLM_USE_V1: $VLLM_USE_V1"

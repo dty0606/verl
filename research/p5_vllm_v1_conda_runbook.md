@@ -23,7 +23,12 @@ References checked on 2026-05-06: vLLM marks `v0.20.1` as the latest GitHub rele
 - Current SageMaker Code Editor P5 is container-based: no `systemctl`, no `yum`/`apt`, no Docker daemon.
 - Do not try Docker-in-Docker on SM CE. Build/push ECR images later from EC2, CodeBuild, GitHub Actions, or a Docker-enabled SageMaker domain.
 - P5 may not have Git. Use GitHub for Codex/Kiro sync, then S3 sync snapshots to P5.
-- The 99 GB EBS root can fill during checkpoints. Put bulky logs/checkpoints on `/mnt/sagemaker-nvme/` and sync important artifacts to S3 because NVMe is ephemeral.
+- P5 storage layout differs by instance. East P5 exposed a small 99 GB
+  `/home/sagemaker-user`; West P5 exposed large `/home/sagemaker-user` but a
+  tiny 37 GB container overlay at `/`. In both cases, do not let Ray, Python
+  temp files, W&B, checkpoints, or caches fall back to overlay-backed paths.
+  Put bulky logs/checkpoints on `/mnt/sagemaker-nvme/` and sync important
+  artifacts to S3 because NVMe is ephemeral.
 
 ## Kiro To P5 Snapshot
 
@@ -253,6 +258,50 @@ tail -f /mnt/sagemaker-nvme/tau3_sdpo/logs/east_p5_original_sdpo_vllm_v1_full_30
 This helper sets `MODE=sdpo` and `SDPO_ARM=original`, uses the known-good vLLM
 V1 profile `02_auto_prefix_24k_48k`, and moves Ray temp, trainer checkpoints,
 rollout JSONLs, W&B files, cache dirs, and logs to `/mnt/sagemaker-nvme`.
+
+## West P5 GRPO Resume From Step 60
+
+Use this after the clean-GRPO v2 run crashed from infrastructure pressure rather
+than model collapse. The W&B run `ghyw4x9s` stopped after step 78, but W&B rows
+through step 78 showed `prompt_clip=0`, `response_clip=0`, `budget_exhausted=0`,
+`env_error=0`, and `bedrock_error=0`. Resume from the last confirmed save point,
+`global_step_60`, and route every heavy runtime path to NVMe.
+
+First, clean any stale overlay-backed temp files if `/` is nearly full:
+
+```bash
+df -h /
+du -sh /tmp/* 2>/dev/null | sort -rh | head -20
+rm -rf /tmp/ray /tmp/tmpxft_* /tmp/torchinductor_* 2>/dev/null || true
+df -h /
+```
+
+Then sync the latest code and launch the dedicated resume helper:
+
+```bash
+cd ~/verl_tau3_sdpo_vllm20
+aws s3 sync s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/repo/ ~/verl_tau3_sdpo_vllm20/ \
+  --exclude "datasets/*" --exclude "checkpoints/*" --exclude "outputs/*" \
+  --exclude "output/*" --exclude "wandb/*" --exclude "logs/*" --exclude "*.tgz" \
+  --region us-west-2
+
+source activate sdpo-vllm20-v1
+
+nohup bash scripts/p5_resume_west_grpo_vllm_v1_clean_from_step60.sh \
+  > /mnt/sagemaker-nvme/tau3_sdpo/logs/grpo_vllm_v1_clean_300_v2_resume60.nohup.log 2>&1 &
+echo $! > /mnt/sagemaker-nvme/tau3_sdpo/logs/grpo_vllm_v1_clean_300_v2_resume60.pid
+disown
+
+tail -f /mnt/sagemaker-nvme/tau3_sdpo/logs/grpo_vllm_v1_clean_300_v2_resume60.nohup.log
+```
+
+The helper discovers the old
+`LOCAL-TAU3-GRPO-json-real_sft_step800-grpo_vllm_v1_clean_300_v2_02_auto_prefix_24k_48k/global_step_60`
+checkpoint under either the repo checkpoint tree or the NVMe checkpoint tree.
+If it cannot find the checkpoint, set `RESUME_FROM_PATH=/absolute/path/to/global_step_60`.
+It keeps the same clean GRPO settings: fixed-parser code, `TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0`,
+`MAX_RESPONSE_LENGTH=24576`, `MAX_MODEL_LEN=49152`, auto KV cache, prefix caching
+enabled, and profile `02_auto_prefix_24k_48k`.
 
 ## Build Env
 

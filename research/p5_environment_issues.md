@@ -295,13 +295,18 @@ To fully fix GDN JIT before full runs:
 ## Platform Constraints (SM CE)
 
 - Container-based: no `systemctl`, no `yum`/`apt`, no Docker daemon
-- 99 GB EBS root (cannot resize after domain creation)
+- P5 storage layout is instance/container dependent. East P5 may expose a 99 GB
+  `/home/sagemaker-user`; West P5 may expose a large `/home/sagemaker-user`
+  but only a ~37 GB container overlay at `/`.
 - Some east-P5 spaces have only the 99 GB EBS root plus large ephemeral NVMe.
   Keep code and conda on EBS, but put Ray temp, `TMPDIR`, rollout dumps, W&B
   local files, trainer outputs, and checkpoints on `/mnt/sagemaker-nvme`.
 - `ROLLOUT_OUTPUT_ROOT` only moves rollout JSONLs. Trainer checkpoints follow
   `SDPO_CHECKPOINT_ROOT`; capacity-matrix logs follow `LOG_ROOT`; Ray sessions
   follow `RAY_TMPDIR`.
+- On West P5, also protect the tiny overlay by routing `TMP`, `TEMP`,
+  `WANDB_CACHE_DIR`, `HF_HOME`, `TRANSFORMERS_CACHE`, `TORCH_HOME`,
+  `TRITON_CACHE_DIR`, and `XDG_CACHE_HOME` to NVMe.
 
 Recommended low-EBS exports:
 
@@ -309,6 +314,8 @@ Recommended low-EBS exports:
 export NVME_ROOT=/mnt/sagemaker-nvme/tau3_sdpo
 mkdir -p "$NVME_ROOT"/{tmp,ray_tmp,logs,outputs,output,checkpoints,wandb,cache}
 export TMPDIR="$NVME_ROOT/tmp"
+export TMP="$TMPDIR"
+export TEMP="$TMPDIR"
 export RAY_TMPDIR="$NVME_ROOT/ray_tmp"
 export SDPO_OUTPUT_ROOT="$NVME_ROOT/output/SDPO"
 export SDPO_CHECKPOINT_ROOT="$NVME_ROOT/checkpoints/SDPO"
@@ -318,11 +325,16 @@ export WANDB_DIR="$NVME_ROOT/wandb"
 export WANDB_CACHE_DIR="$NVME_ROOT/cache/wandb"
 export HF_HOME="$NVME_ROOT/cache/huggingface"
 export HF_DATASETS_CACHE="$NVME_ROOT/cache/huggingface/datasets"
+export TRANSFORMERS_CACHE="$NVME_ROOT/cache/huggingface/transformers"
+export TORCH_HOME="$NVME_ROOT/cache/torch"
+export TRITON_CACHE_DIR="$NVME_ROOT/cache/triton"
+export XDG_CACHE_HOME="$NVME_ROOT/cache/xdg"
 ```
 
 Before long runs, verify:
 
 ```bash
+df -h /
 df -h /home/sagemaker-user /mnt/sagemaker-nvme
 du -sh ~/tmp /tmp/ray* ~/verl_tau3_sdpo_vllm20/checkpoints ~/.cache 2>/dev/null
 ```
