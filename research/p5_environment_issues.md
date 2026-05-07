@@ -296,6 +296,36 @@ To fully fix GDN JIT before full runs:
 
 - Container-based: no `systemctl`, no `yum`/`apt`, no Docker daemon
 - 99 GB EBS root (cannot resize after domain creation)
+- Some east-P5 spaces have only the 99 GB EBS root plus large ephemeral NVMe.
+  Keep code and conda on EBS, but put Ray temp, `TMPDIR`, rollout dumps, W&B
+  local files, trainer outputs, and checkpoints on `/mnt/sagemaker-nvme`.
+- `ROLLOUT_OUTPUT_ROOT` only moves rollout JSONLs. Trainer checkpoints follow
+  `SDPO_CHECKPOINT_ROOT`; capacity-matrix logs follow `LOG_ROOT`; Ray sessions
+  follow `RAY_TMPDIR`.
+
+Recommended low-EBS exports:
+
+```bash
+export NVME_ROOT=/mnt/sagemaker-nvme/tau3_sdpo
+mkdir -p "$NVME_ROOT"/{tmp,ray_tmp,logs,outputs,output,checkpoints,wandb,cache}
+export TMPDIR="$NVME_ROOT/tmp"
+export RAY_TMPDIR="$NVME_ROOT/ray_tmp"
+export SDPO_OUTPUT_ROOT="$NVME_ROOT/output/SDPO"
+export SDPO_CHECKPOINT_ROOT="$NVME_ROOT/checkpoints/SDPO"
+export LOG_ROOT="$NVME_ROOT/logs/<run_name>"
+export ROLLOUT_OUTPUT_ROOT="$NVME_ROOT/outputs/<run_name>"
+export WANDB_DIR="$NVME_ROOT/wandb"
+export WANDB_CACHE_DIR="$NVME_ROOT/cache/wandb"
+export HF_HOME="$NVME_ROOT/cache/huggingface"
+export HF_DATASETS_CACHE="$NVME_ROOT/cache/huggingface/datasets"
+```
+
+Before long runs, verify:
+
+```bash
+df -h /home/sagemaker-user /mnt/sagemaker-nvme
+du -sh ~/tmp /tmp/ray* ~/verl_tau3_sdpo_vllm20/checkpoints ~/.cache 2>/dev/null
+```
 - NVMe is ephemeral (28 TB `/mnt/sagemaker-nvme/`, lost on stop)
 - No root access for system-level CUDA installs
 - Use `source activate <env>` not `conda activate <env>`

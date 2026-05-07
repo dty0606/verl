@@ -124,11 +124,21 @@ Export the runtime variables before every preflight, smoke, or full run:
 
 ```bash
 source activate sdpo-vllm20-v1
+export NVME_ROOT=/mnt/sagemaker-nvme/tau3_sdpo
+mkdir -p "$NVME_ROOT"/{tmp,ray_tmp,logs,outputs,output,checkpoints,wandb,cache}
+
 export CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"
 export PATH="$CONDA_PREFIX/bin:$CONDA_PREFIX/nvvm/bin:$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/lib64:$CUDA_HOME/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 export LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LIBRARY_PATH:-}"
-export TMPDIR="$HOME/tmp"
+export TMPDIR="$NVME_ROOT/tmp"
+export RAY_TMPDIR="$NVME_ROOT/ray_tmp"
+export SDPO_OUTPUT_ROOT="$NVME_ROOT/output/SDPO"
+export SDPO_CHECKPOINT_ROOT="$NVME_ROOT/checkpoints/SDPO"
+export WANDB_DIR="$NVME_ROOT/wandb"
+export WANDB_CACHE_DIR="$NVME_ROOT/cache/wandb"
+export HF_HOME="$NVME_ROOT/cache/huggingface"
+export HF_DATASETS_CACHE="$NVME_ROOT/cache/huggingface/datasets"
 export VLLM_USE_V1=1
 export TAU2_DATA_DIR=~/tau2-bench/data
 export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
@@ -139,6 +149,11 @@ export MODEL_PATH="$ARTIFACT_DIR/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FU
 export MODEL_ALIAS=real_sft_step800
 export TASK_PATH=datasets/tau3_live_airline_canonical_json
 ```
+
+On low-EBS east P5 hosts, do not rely on `ROLLOUT_OUTPUT_ROOT` alone. It only
+moves rollout JSONLs. Trainer checkpoints follow `SDPO_CHECKPOINT_ROOT`, Ray
+sessions follow `RAY_TMPDIR`, capacity-matrix logs follow `LOG_ROOT`, and W&B
+local files follow `WANDB_DIR`.
 
 East-P5 readiness gates:
 
@@ -185,9 +200,10 @@ CONTINUE_ON_FAIL=0 \
 CAPACITY_PROFILES="02_auto_prefix_24k_48k" \
 PROJECT_NAME=SDPO-vllm-v1-east-readiness \
 RUN_NAME_PREFIX=east_p5_grpo_vllm_v1_readiness_3step \
-ROLLOUT_OUTPUT_ROOT="$PWD/outputs/east_p5_grpo_vllm_v1_readiness_3step" \
+LOG_ROOT="$NVME_ROOT/logs/east_p5_grpo_vllm_v1_readiness_3step" \
+ROLLOUT_OUTPUT_ROOT="$NVME_ROOT/outputs/east_p5_grpo_vllm_v1_readiness_3step" \
 bash scripts/p5_run_vllm_v1_capacity_matrix.sh \
-  2>&1 | tee logs/east_p5_grpo_vllm_v1_readiness_3step.log
+  2>&1 | tee "$NVME_ROOT/logs/east_p5_grpo_vllm_v1_readiness_3step.console.log"
 ```
 
 If east P5 will run vanilla SDPO, follow with a one-step original-SDPO smoke
@@ -212,9 +228,10 @@ CONTINUE_ON_FAIL=0 \
 CAPACITY_PROFILES="02_auto_prefix_24k_48k" \
 PROJECT_NAME=SDPO-vllm-v1-east-sdpo-smoke \
 RUN_NAME_PREFIX=east_p5_original_sdpo_vllm_v1_1step \
-ROLLOUT_OUTPUT_ROOT="$PWD/outputs/east_p5_original_sdpo_vllm_v1_1step" \
+LOG_ROOT="$NVME_ROOT/logs/east_p5_original_sdpo_vllm_v1_1step" \
+ROLLOUT_OUTPUT_ROOT="$NVME_ROOT/outputs/east_p5_original_sdpo_vllm_v1_1step" \
 bash scripts/p5_run_vllm_v1_capacity_matrix.sh \
-  2>&1 | tee logs/east_p5_original_sdpo_vllm_v1_1step.log
+  2>&1 | tee "$NVME_ROOT/logs/east_p5_original_sdpo_vllm_v1_1step.console.log"
 ```
 
 ## Build Env
