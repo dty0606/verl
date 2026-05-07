@@ -920,7 +920,7 @@ The selected profile will then write rollout JSONLs under
 After a passing smoke, bundle the evidence for Codex/Pro review:
 
 ```bash
-SMOKE_NAME=grpo_vllm_v1_readiness_10step \
+BUNDLE_NAME=grpo_vllm_v1_readiness_10step \
 PROFILE_NAME=02_auto_prefix_24k_48k \
 LOG_FILE=logs/grpo_vllm_v1_readiness_10step.log \
 bash scripts/tau3/bundle_grpo_readiness_from_p5.sh
@@ -931,6 +931,9 @@ This uploads
 when the AWS CLI is available on P5. The bundle includes the smoke log, profile
 log, preflight, summary, rollout JSONLs, W&B metadata when present, and a
 heuristic analysis summary.
+
+`SMOKE_NAME` is still accepted as a legacy alias, but prefer `BUNDLE_NAME` for
+full runs so the artifact name does not imply the run was only a smoke.
 
 If Kiro also needs the raw local W&B run directory for deeper scalar-history
 recovery, add `INCLUDE_WANDB_DIR=1` to the bundle command. Keep it off by

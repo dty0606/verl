@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
-# Bundle a GRPO readiness smoke from P5 and optionally upload it to S3.
+# Bundle GRPO readiness or long-run artifacts from P5 and optionally upload to S3.
 #
 # Usage on P5:
-#   SMOKE_NAME=grpo_vllm_v1_readiness_10step \
+#   BUNDLE_NAME=grpo_vllm_v1_readiness_10step \
 #   PROFILE_NAME=02_auto_prefix_24k_48k \
 #   bash scripts/tau3/bundle_grpo_readiness_from_p5.sh
 
 set -euo pipefail
 
-SMOKE_NAME="${SMOKE_NAME:-grpo_vllm_v1_readiness_10step}"
+BUNDLE_NAME="${BUNDLE_NAME:-${RUN_NAME:-${SMOKE_NAME:-grpo_vllm_v1_readiness_10step}}}"
 PROFILE_NAME="${PROFILE_NAME:-02_auto_prefix_24k_48k}"
 S3_PREFIX="${S3_PREFIX:-s3://tianyd-rlvr-research/tau3-sdpo/latest-verl}"
-STAGE_DIR="${STAGE_DIR:-/tmp/${SMOKE_NAME}_bundle}"
+STAGE_DIR="${STAGE_DIR:-/tmp/${BUNDLE_NAME}_bundle}"
 INCLUDE_WANDB_DIR="${INCLUDE_WANDB_DIR:-0}"
 
-LOG_FILE="${LOG_FILE:-logs/${SMOKE_NAME}.log}"
+LOG_FILE="${LOG_FILE:-logs/${BUNDLE_NAME}.log}"
 MATRIX_ROOT="${MATRIX_ROOT:-logs/vllm_v1_capacity_matrix}"
 ROLLOUT_DIR="${ROLLOUT_DIR:-outputs/vllm_v1_capacity_matrix/${PROFILE_NAME}/rollout_data}"
 
-echo "=== Bundling GRPO readiness artifacts ==="
-echo "SMOKE_NAME=$SMOKE_NAME"
+echo "=== Bundling GRPO run artifacts ==="
+echo "BUNDLE_NAME=$BUNDLE_NAME"
+if [ -n "${SMOKE_NAME:-}" ]; then
+    echo "SMOKE_NAME=$SMOKE_NAME (legacy alias)"
+fi
 echo "PROFILE_NAME=$PROFILE_NAME"
 echo "LOG_FILE=$LOG_FILE"
 echo "MATRIX_ROOT=$MATRIX_ROOT"
@@ -75,7 +78,7 @@ PY
 
 if [ -f "$STAGE_DIR/full_log.txt" ]; then
     {
-        echo "=== key smoke lines ==="
+        echo "=== key run lines ==="
         grep -E "PREFLIGHT=PASS|Capacity profiles|Profile:|PASS |FAIL |SKIP |Tau3 all-messages observation|VLLM_USE_V1|VLLM_ENABLE_PREFIX_CACHING|VLLM_KV_CACHE_DTYPE|MAX_RESPONSE_LENGTH|MAX_MODEL_LEN" "$STAGE_DIR/full_log.txt" || true
         echo
         echo "=== metrics ==="
@@ -112,14 +115,14 @@ if [ -f scripts/tau3/analyze_grpo_smoke_bundle.py ]; then
         > "$STAGE_DIR/analysis_summary.txt" || true
 fi
 
-BUNDLE_TGZ="/tmp/${SMOKE_NAME}_bundle.tgz"
+BUNDLE_TGZ="/tmp/${BUNDLE_NAME}_bundle.tgz"
 rm -f "$BUNDLE_TGZ"
 tar -C "$STAGE_DIR" -czf "$BUNDLE_TGZ" .
 echo "Created bundle: $(du -sh "$BUNDLE_TGZ" | cut -f1)"
 
 if command -v aws >/dev/null 2>&1; then
-    aws s3 cp "$BUNDLE_TGZ" "$S3_PREFIX/diagnostics/${SMOKE_NAME}_bundle.tgz"
-    echo "Bundle at: $S3_PREFIX/diagnostics/${SMOKE_NAME}_bundle.tgz"
+    aws s3 cp "$BUNDLE_TGZ" "$S3_PREFIX/diagnostics/${BUNDLE_NAME}_bundle.tgz"
+    echo "Bundle at: $S3_PREFIX/diagnostics/${BUNDLE_NAME}_bundle.tgz"
 else
     echo "aws CLI not found; bundle is local only: $BUNDLE_TGZ"
 fi
