@@ -651,6 +651,20 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Trainer guardrail: env-error samples have `response_mask` and reward zeroed and are moved into singleton GRPO UID groups so they cannot affect actor loss or sibling group baselines. If `TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD` is reached, actor update is skipped for that batch; critic update is also skipped if enabled.
 - SDPO guardrail: env-error rows are excluded from failed-sample teacher construction and logged as `self_distillation/env_error_excluded_fraction`.
 - Launch defaults: `TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'`, `TAU3_MASK_ENV_ERROR_ROLLOUTS=1`, `TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD=0.25`, and `TAU3_RETRY_STEP_ON_TRANSIENT=0`.
+
+## 2026-05-07 Memory-SDPO First Slice
+
+- Added a teacher-side Memory-SDPO hook for Tau3 SDPO. Actor/student rollout context is unchanged; memory is inserted only into the SDPO teacher reprompt before teacher logprob scoring.
+- New utility: `verl/utils/tau3_sdpo_memory.py` loads compact JSONL/JSON cards, strips raw `<think>`, and retrieves either `relevant` or `random` cards.
+- Seed card bank: `research/memory_cards/tau3_airline_seed_cards.jsonl`.
+- Offline prompt builder: `scripts/tau3/build_sdpo_memory_teacher_probe.py`.
+- Live toggles:
+  - `SDPO_MEMORY_ENABLED=true`
+  - `SDPO_MEMORY_PATH=research/memory_cards/tau3_airline_seed_cards.jsonl`
+  - `SDPO_MEMORY_MODE=relevant|random`
+  - `SDPO_MEMORY_INJECT_WHEN=no_solution`
+- New W&B metrics include `self_distillation/memory_used_fraction`, `memory_random_used_fraction`, `memory_no_solution_used_fraction`, and `memory_section_char_mean`.
+- Recommended next step before a full Memory-SDPO run: build T0/T1/T2 teacher probe prompts from failed rollout JSONLs and verify relevant memory beats random memory on teacher next-action quality.
 - Rationale for `TAU3_RETRY_STEP_ON_TRANSIENT=0`: replaying outer `env.step(action)` can duplicate transactional writes if the tool state changed before the user-simulator call failed. Prefer retry inside Tau2/LiteLLM user-call handling; the outer layer should mark/mask env errors rather than replay actions.
 
 ## Evidence Carried Forward

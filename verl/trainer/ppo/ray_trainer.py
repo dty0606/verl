@@ -71,6 +71,7 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.tau3_sdpo_memory import load_memory_bank, render_memory_section, strip_thinking
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
@@ -1521,12 +1522,41 @@ class RayPPOTrainer:
             "feedback_template",
             "\n\nThe following is feedback from your unsuccessful earlier attempt:\n\n{feedback_raw}",
         )
+        memory_cfg = sdpo_cfg.get("memory", {}) or {}
+        memory_enabled = bool(memory_cfg.get("enabled", False))
+        memory_bank = None
+        memory_load_error = ""
+        if memory_enabled:
+            memory_path = str(memory_cfg.get("path", "") or "").strip()
+            if memory_path:
+                try:
+                    memory_bank = load_memory_bank(
+                        memory_path,
+                        max_card_chars=int(memory_cfg.get("max_card_chars", 2200)),
+                    )
+                    if not memory_bank.cards:
+                        memory_load_error = f"no memory cards loaded from {memory_path}"
+                except Exception as exc:
+                    memory_load_error = str(exc)
+            else:
+                memory_load_error = "tau3.sdpo.memory.path is empty"
+            if memory_load_error and bool(memory_cfg.get("fail_on_error", True)):
+                raise RuntimeError(f"Tau3 SDPO memory is enabled but unavailable: {memory_load_error}")
+        memory_mode = str(memory_cfg.get("mode", "relevant")).lower()
+        memory_inject_when = str(memory_cfg.get("inject_when", "no_solution")).lower()
+        memory_template = memory_cfg.get("template", None)
+        memory_query_failed_response_chars = int(memory_cfg.get("query_failed_response_chars", 1400))
 
         raw_prompts = list(batch.non_tensor_batch.get("raw_prompt", []))
         messages = []
         target_mask_values: list[float] = []
         feedback_used = []
         solutions_used = []
+        memory_available = []
+        memory_used = []
+        memory_random_used = []
+        memory_no_solution_used = []
+        memory_section_lengths = []
         for i in range(batch_size):
             raw_prompt = list(raw_prompts[i]) if i < len(raw_prompts) else []
             prompt_text = raw_prompt[-1].get("content", "") if raw_prompt else ""
@@ -1535,21 +1565,60 @@ class RayPPOTrainer:
             has_solution = solution_strs[i] is not None and (on_failure_path or not only_failed_with_feedback)
             has_feedback = feedback_list[i] is not None and on_failure_path
             use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
-            active = (has_solution or use_feedback) and (on_failure_path or not only_failed_with_feedback)
+            memory_section = ""
+            has_memory = False
+            try_memory = (
+                memory_bank is not None
+                and on_failure_path
+                and memory_inject_when in {"always", "failed", "failed_only", "all_failures", "no_solution"}
+                and (memory_inject_when != "no_solution" or not has_solution)
+            )
+            if try_memory:
+                query_parts = [prompt_text]
+                if feedback_list[i]:
+                    query_parts.append(str(feedback_list[i]))
+                if response_texts[i]:
+                    query_parts.append(strip_thinking(response_texts[i])[:memory_query_failed_response_chars])
+                card = memory_bank.retrieve(
+                    "\n\n".join(query_parts),
+                    mode=memory_mode,
+                    rng_key=f"{uids[i] if i < len(uids) else ''}:{i}",
+                )
+                if card is not None:
+                    memory_section = render_memory_section(card, template=memory_template)
+                    has_memory = True
+            active = (has_solution or use_feedback or has_memory) and (on_failure_path or not only_failed_with_feedback)
 
             solution_section = (
                 solution_template.format(successful_previous_attempt=solution_strs[i]) if has_solution else ""
             )
             feedback_section = feedback_template.format(feedback_raw=feedback_list[i]) if use_feedback else ""
-            reprompt_text = (
-                reprompt_template.format(prompt=prompt_text, solution=solution_section, feedback=feedback_section)
-                if active
-                else prompt_text
-            )
+            if active:
+                reprompt_kwargs = {
+                    "prompt": prompt_text,
+                    "solution": solution_section,
+                    "feedback": feedback_section,
+                    "memory": memory_section,
+                }
+                if "{memory}" in reprompt_template:
+                    reprompt_text = reprompt_template.format(**reprompt_kwargs)
+                else:
+                    # Keep backward compatibility for old launcher overrides by
+                    # placing memory in the demonstration slot if no explicit
+                    # memory placeholder exists.
+                    reprompt_kwargs["solution"] = solution_section + memory_section
+                    reprompt_text = reprompt_template.format(**reprompt_kwargs)
+            else:
+                reprompt_text = prompt_text
             messages.append(system_messages + [{"role": "user", "content": reprompt_text}])
             target_mask_values.append(1.0 if active else 0.0)
             feedback_used.append(use_feedback)
             solutions_used.append(has_solution)
+            memory_available.append(memory_bank is not None and on_failure_path)
+            memory_used.append(has_memory)
+            memory_random_used.append(has_memory and memory_mode in {"random", "shuffle", "shuffled"})
+            memory_no_solution_used.append(has_memory and not has_solution)
+            memory_section_lengths.append(len(memory_section) if has_memory else 0)
 
         if sum(target_mask_values) == 0:
             zeros = torch.zeros(batch_size, dtype=torch.float32, device=responses.device)
@@ -1560,6 +1629,9 @@ class RayPPOTrainer:
                 "self_distillation/success_sample_fraction": 0.0,
                 "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
                 "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
+                "self_distillation/memory_available_fraction": sum(bool(x) for x in memory_available) / batch_size,
+                "self_distillation/memory_used_fraction": 0.0,
+                "self_distillation/memory_load_error": 1.0 if memory_load_error else 0.0,
             }
             return None, zeros, metrics
 
@@ -1618,6 +1690,15 @@ class RayPPOTrainer:
             "self_distillation/success_sample_fraction": sum(bool(x) for x in solutions_used) / batch_size,
             "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
             "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
+            "self_distillation/memory_available_fraction": sum(bool(x) for x in memory_available) / batch_size,
+            "self_distillation/memory_used_fraction": sum(bool(x) for x in memory_used) / batch_size,
+            "self_distillation/memory_random_used_fraction": sum(bool(x) for x in memory_random_used) / batch_size,
+            "self_distillation/memory_no_solution_used_fraction": sum(bool(x) for x in memory_no_solution_used)
+            / batch_size,
+            "self_distillation/memory_section_char_mean": float(np.mean(memory_section_lengths))
+            if memory_section_lengths
+            else 0.0,
+            "self_distillation/memory_load_error": 1.0 if memory_load_error else 0.0,
             "self_distillation/teacher_prompt_token_mean": float(
                 teacher_prompt_attention_mask.float().sum(dim=1).mean().item()
             ),

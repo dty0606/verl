@@ -117,7 +117,7 @@ tau3:
     remove_thinking_from_demonstration: True
     serialize_nonstring_feedback: True
     reprompt_template: |-
-      {prompt}{solution}{feedback}
+      {prompt}{solution}{memory}{feedback}
 
       Correctly solve the original task.
     solution_template: |-
@@ -130,3 +130,19 @@ tau3:
       The following is feedback from your unsuccessful earlier attempt:
 
       {feedback_raw}
+    memory:
+      enabled: False
+      # Teacher-side privileged memory only. The actor/student rollout context is
+      # unchanged; this section is used only when building SDPO teacher prompts.
+      path: ${oc.env:SDPO_MEMORY_PATH,}
+      mode: ${oc.env:SDPO_MEMORY_MODE,relevant}
+      inject_when: ${oc.env:SDPO_MEMORY_INJECT_WHEN,no_solution}
+      fail_on_error: True
+      max_card_chars: 2200
+      query_failed_response_chars: 1400
+      template: |-
+
+        Relevant train-only correction memory:
+        {memory_card}
+
+        Use this memory only as decision guidance. Do not copy IDs, hidden facts, or raw wording.

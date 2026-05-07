@@ -14,7 +14,8 @@ Implemented vanilla SDPO path:
 1. Keep the Tau3 GRPO rollout path as the source of sampled trajectories,
    rewards, and feedback diagnostics.
 2. After rewards are available, select failed samples with usable feedback and
-   construct SDPO reprompts without memory/retrieval augmentation.
+   construct SDPO reprompts. Optional teacher-side memory can be enabled for
+   failed samples without a successful peer; it is disabled by default.
 3. Score the original response under the teacher/reprompt context through
    `actor_rollout_wg.compute_log_prob`.
 4. Attach response-shaped `teacher_logprobs`, `self_distillation_mask`, and
@@ -25,7 +26,8 @@ Implemented vanilla SDPO path:
 Current scope:
 
 - Vanilla SDPO only.
-- No memory/DENSE retrieval.
+- Teacher-side compact memory retrieval is implemented behind
+  `tau3.sdpo.memory.enabled=False`; actor rollout context is unchanged.
 - No full-logit/top-k distillation.
 - No separate teacher model pool.
 - No MT-STePO endpoint-boundary variant.
@@ -37,3 +39,5 @@ Next validation:
    rollouts with feedback.
 3. Check that `actor/pg_loss` and `self_distillation/token_fraction` are finite.
 4. Only after this smoke passes, compare against the GRPO baseline.
+5. For Memory-SDPO, first run the offline teacher probe in
+   `research/memory_sdpo_teacher_probe_plan.md` before a full P5 run.
