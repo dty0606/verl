@@ -4,6 +4,9 @@ rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
 # actor_rollout_ref.ref: FSDP config same as actor. For models larger than 7B, it’s recommended to turn on offload for ref by default
 strategy: ${actor_rollout_ref.actor.strategy}
 
+# Micro batch size per GPU for ref forward passes (mirrors actor for config compatibility)
+ppo_micro_batch_size_per_gpu: ${oc.select:actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu,1}
+
 # whether to enable torch.compile
 # same as actor_rollout_ref.actor.use_torch_compile if it exists, otherwise 1
 use_torch_compile: ${oc.select:actor_rollout_ref.actor.use_torch_compile,true}
