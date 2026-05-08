@@ -4,8 +4,10 @@ from pathlib import Path
 import pytest
 
 torch = pytest.importorskip("torch")
+tensordict = pytest.importorskip("tensordict")
 
 ROOT = Path(__file__).resolve().parents[2]
+TensorDict = tensordict.TensorDict
 
 LOSSES_SPEC = importlib.util.spec_from_file_location(
     "sdpo_losses_test",
@@ -14,6 +16,14 @@ LOSSES_SPEC = importlib.util.spec_from_file_location(
 sdpo_losses = importlib.util.module_from_spec(LOSSES_SPEC)
 assert LOSSES_SPEC.loader is not None
 LOSSES_SPEC.loader.exec_module(sdpo_losses)
+
+PADDING_SPEC = importlib.util.spec_from_file_location(
+    "sdpo_padding_test",
+    ROOT / "verl" / "workers" / "utils" / "padding.py",
+)
+sdpo_padding = importlib.util.module_from_spec(PADDING_SPEC)
+assert PADDING_SPEC.loader is not None
+PADDING_SPEC.loader.exec_module(sdpo_padding)
 
 
 def test_sdpo_topk_jsd_loss_is_zero_for_matching_distributions():
@@ -86,3 +96,43 @@ def test_sdpo_topk_mass_metrics_average_selected_tokens():
 
     assert metrics["self_distillation/student_topk_mass"] == pytest.approx(0.7)
     assert metrics["self_distillation/teacher_topk_mass"] == pytest.approx(0.8)
+
+
+def test_response_shaped_sampled_teacher_logprobs_are_not_unpadded_as_full_sequence():
+    data = TensorDict(
+        {
+            "input_ids": torch.tensor([[1, 2, 3, 4, 5], [0, 0, 6, 7, 8]]),
+            "attention_mask": torch.tensor([[1, 1, 1, 1, 1], [0, 0, 1, 1, 1]]),
+            "response_mask": torch.tensor([[1, 1], [1, 0]]),
+            "position_ids": torch.tensor([[0, 1, 2, 3, 4], [0, 0, 0, 1, 2]]),
+            "teacher_logprobs": torch.randn(2, 2),
+        },
+        batch_size=[2],
+    )
+
+    converted = sdpo_padding.left_right_2_no_padding(data)
+
+    assert not converted["teacher_logprobs"].is_nested
+    assert converted["teacher_logprobs"].shape == torch.Size([2, 2])
+
+
+def test_full_sequence_topk_teacher_tensors_are_unpadded_to_nested_values():
+    topk = 3
+    data = TensorDict(
+        {
+            "input_ids": torch.tensor([[1, 2, 3, 4, 5], [0, 0, 6, 7, 8]]),
+            "attention_mask": torch.tensor([[1, 1, 1, 1, 1], [0, 0, 1, 1, 1]]),
+            "response_mask": torch.tensor([[1, 1], [1, 0]]),
+            "position_ids": torch.tensor([[0, 1, 2, 3, 4], [0, 0, 0, 1, 2]]),
+            "teacher_logprobs": torch.randn(2, 5, topk),
+            "teacher_ids": torch.ones(2, 5, topk, dtype=torch.long),
+        },
+        batch_size=[2],
+    )
+
+    converted = sdpo_padding.left_right_2_no_padding(data)
+
+    assert converted["teacher_logprobs"].is_nested
+    assert converted["teacher_ids"].is_nested
+    assert converted["teacher_logprobs"].values().shape == torch.Size([8, topk])
+    assert converted["teacher_ids"].values().shape == torch.Size([8, topk])

@@ -80,19 +80,34 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         )
         data["routed_experts"] = routed_experts_nested
 
-    # (bsz, seqlen, topk)
+    # Full-logit SDPO stores full-sequence top-k teacher tensors, while
+    # sampled-token SDPO stores response-only teacher logprobs. Only the
+    # full-sequence tensors should be unpadded with full attention indices.
     teacher_logprobs = data.get("teacher_logprobs", None)
     teacher_ids = data.get("teacher_ids", None)
     if teacher_logprobs is not None:
-        teacher_logprobs_rmpad = index_first_axis(teacher_logprobs.unsqueeze(-1).flatten(0, 1), indices)
-        teacher_logprobs_nested = torch.nested.nested_tensor_from_jagged(
-            teacher_logprobs_rmpad.squeeze(-1), offsets=cu_seqlens
-        )
-        data["teacher_logprobs"] = teacher_logprobs_nested
+        if teacher_logprobs.shape[1] == max_seq_len:
+            teacher_logprobs_rmpad = index_first_axis(teacher_logprobs.flatten(0, 1), indices)
+            teacher_logprobs_nested = torch.nested.nested_tensor_from_jagged(
+                teacher_logprobs_rmpad, offsets=cu_seqlens
+            )
+            data["teacher_logprobs"] = teacher_logprobs_nested
+        elif teacher_logprobs.shape[1] != max_response_len:
+            raise ValueError(
+                "teacher_logprobs must be either full-sequence or response-shaped; "
+                f"got shape={tuple(teacher_logprobs.shape)}, max_seq_len={max_seq_len}, "
+                f"max_response_len={max_response_len}"
+            )
     if teacher_ids is not None:
-        teacher_ids_rmpad = index_first_axis(teacher_ids.unsqueeze(-1).flatten(0, 1), indices)
-        teacher_ids_nested = torch.nested.nested_tensor_from_jagged(teacher_ids_rmpad.squeeze(-1), offsets=cu_seqlens)
-        data["teacher_ids"] = teacher_ids_nested
+        if teacher_ids.shape[1] == max_seq_len:
+            teacher_ids_rmpad = index_first_axis(teacher_ids.flatten(0, 1), indices)
+            teacher_ids_nested = torch.nested.nested_tensor_from_jagged(teacher_ids_rmpad, offsets=cu_seqlens)
+            data["teacher_ids"] = teacher_ids_nested
+        else:
+            raise ValueError(
+                "teacher_ids are only supported as full-sequence top-k tensors; "
+                f"got shape={tuple(teacher_ids.shape)}, max_seq_len={max_seq_len}"
+            )
 
     return data
 
