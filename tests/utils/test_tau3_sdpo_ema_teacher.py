@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 omegaconf = pytest.importorskip("omegaconf")
@@ -8,7 +10,7 @@ OmegaConf = omegaconf.OmegaConf
 from verl.trainer.ppo.utils import need_sdpo_ema_teacher
 from verl.workers.config.actor import FSDPActorConfig
 from verl.workers.config.engine import FSDPEngineConfig
-from verl.workers.engine_workers import ema_update_module_params
+from verl.workers.engine_workers import _force_model_only_checkpoint_contents, ema_update_module_params
 
 
 def test_need_sdpo_ema_teacher_only_for_sdpo_ema_ref():
@@ -73,6 +75,22 @@ def test_ema_update_rejects_mismatched_modules():
 
     with pytest.raises(RuntimeError, match="shape mismatch"):
         ema_update_module_params(teacher, actor, update_rate=0.25)
+
+
+def test_sdpo_ema_teacher_checkpoint_manager_forced_model_only():
+    manager = SimpleNamespace(
+        checkpoint_save_contents=["model", "optimizer", "extra"],
+        checkpoint_load_contents=["model", "optimizer", "extra"],
+        checkpoint_config={"save_contents": ["model", "optimizer", "extra"], "load_contents": ["model", "optimizer"]},
+    )
+    worker = SimpleNamespace(engine=SimpleNamespace(checkpoint_manager=manager))
+
+    assert _force_model_only_checkpoint_contents(worker)
+
+    assert manager.checkpoint_save_contents == ["model"]
+    assert manager.checkpoint_load_contents == ["model"]
+    assert manager.checkpoint_config["save_contents"] == ["model"]
+    assert manager.checkpoint_config["load_contents"] == ["model"]
 
 
 def test_forward_only_ref_config_skips_ppo_micro_batch_assertion():

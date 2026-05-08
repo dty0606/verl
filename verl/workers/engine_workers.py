@@ -111,6 +111,42 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
     }
 
 
+def _force_model_only_checkpoint_contents(worker) -> bool:
+    """Force a forward-only worker checkpoint manager to save/load model shards only.
+
+    The colocated SDPO EMA teacher is a ref/forward-only worker. It intentionally
+    has no optimizer or scheduler, so reusing the actor checkpoint contents
+    (model/optimizer/extra) makes checkpointing fail after a successful train
+    step. Mutate the instantiated checkpoint manager, not only the Hydra config,
+    because the manager owns the contents actually used at save/load time.
+    """
+    engine = getattr(worker, "engine", None)
+    checkpoint_manager = getattr(engine, "checkpoint_manager", None)
+    if checkpoint_manager is None:
+        return False
+
+    checkpoint_manager.checkpoint_save_contents = ["model"]
+    checkpoint_manager.checkpoint_load_contents = ["model"]
+
+    checkpoint_config = getattr(checkpoint_manager, "checkpoint_config", None)
+    if checkpoint_config is not None:
+        try:
+            with open_dict(checkpoint_config):
+                checkpoint_config.save_contents = ["model"]
+                checkpoint_config.load_contents = ["model"]
+        except Exception:
+            if isinstance(checkpoint_config, dict):
+                checkpoint_config["save_contents"] = ["model"]
+                checkpoint_config["load_contents"] = ["model"]
+            else:
+                try:
+                    checkpoint_config.save_contents = ["model"]
+                    checkpoint_config.load_contents = ["model"]
+                except Exception:
+                    pass
+    return True
+
+
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
 
@@ -757,6 +793,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "would silently reset the teacher, so this is blocked. "
                     "Use a checkpoint created after EMA teacher saving was enabled, or run from scratch."
                 )
+            _force_model_only_checkpoint_contents(self.ref)
             self.ref.load_checkpoint(teacher_path, hdfs_path=None, del_local_after_load=del_local_after_load)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -765,20 +802,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
         if self._should_checkpoint_sdpo_ema_teacher():
             teacher_path = os.path.join(local_path, "sdpo_ema_teacher")
-            # The ref/EMA teacher is forward-only (no optimizer). Override
-            # checkpoint_contents to save model weights only.
-            ref_engine = self.ref.engine
-            original_contents = getattr(ref_engine, "checkpoint_contents", None)
-            if original_contents is not None and hasattr(original_contents, "save"):
-                from copy import copy
-                patched_contents = copy(original_contents)
-                patched_contents.save = [c for c in (patched_contents.save or []) if c != "optimizer"]
-                ref_engine.checkpoint_contents = patched_contents
-            try:
-                self.ref.save_checkpoint(teacher_path, hdfs_path=None, global_step=global_step, max_ckpt_to_keep=None)
-            finally:
-                if original_contents is not None:
-                    ref_engine.checkpoint_contents = original_contents
+            _force_model_only_checkpoint_contents(self.ref)
+            self.ref.save_checkpoint(teacher_path, hdfs_path=None, global_step=global_step, max_ckpt_to_keep=None)
 
     def _should_checkpoint_sdpo_ema_teacher(self) -> bool:
         if self.ref is None or self.actor is None:
