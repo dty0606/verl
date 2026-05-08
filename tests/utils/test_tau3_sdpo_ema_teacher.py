@@ -45,7 +45,26 @@ def test_ema_update_module_params_moves_teacher_toward_actor():
 
     assert metrics["updated"] is True
     assert metrics["param_tensors"] == 1
+    assert metrics["device_transfer_tensors"] == 0
     assert torch.allclose(teacher.weight, torch.full_like(teacher.weight, 0.25))
+
+
+def test_ema_update_module_params_handles_cpu_actor_cuda_teacher():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to reproduce actor/teacher device mismatch")
+
+    teacher = torch.nn.Linear(2, 1, bias=False, device="cuda")
+    actor = torch.nn.Linear(2, 1, bias=False, device="cpu")
+    with torch.no_grad():
+        teacher.weight.fill_(0.0)
+        actor.weight.fill_(1.0)
+
+    metrics = ema_update_module_params(teacher, actor, update_rate=0.25)
+
+    assert metrics["updated"] is True
+    assert metrics["device_transfer_tensors"] == 1
+    assert teacher.weight.device.type == "cuda"
+    assert torch.allclose(teacher.weight.cpu(), torch.full_like(actor.weight, 0.25))
 
 
 def test_ema_update_rejects_mismatched_modules():

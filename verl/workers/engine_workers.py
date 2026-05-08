@@ -61,7 +61,13 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
     """In-place EMA update for two same-shaped modules."""
     update_rate = float(update_rate)
     if update_rate <= 0.0:
-        return {"updated": False, "update_rate": update_rate, "param_tensors": 0, "param_elements": 0}
+        return {
+            "updated": False,
+            "update_rate": update_rate,
+            "param_tensors": 0,
+            "param_elements": 0,
+            "device_transfer_tensors": 0,
+        }
     if update_rate > 1.0:
         raise ValueError(f"EMA update_rate must be <= 1.0, got {update_rate}")
 
@@ -72,6 +78,7 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
 
     param_tensors = 0
     param_elements = 0
+    device_transfer_tensors = 0
     with torch.no_grad():
         for (teacher_name, teacher_param), (actor_name, actor_param) in zip(teacher_params, actor_params):
             if teacher_name != actor_name:
@@ -83,7 +90,15 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
                 )
             if not teacher_param.is_floating_point():
                 continue
-            teacher_param.data.mul_(1.0 - update_rate).add_(actor_param.data.detach(), alpha=update_rate)
+            actor_data = actor_param.data.detach()
+            if actor_data.device != teacher_param.device or actor_data.dtype != teacher_param.dtype:
+                device_transfer_tensors += 1
+                actor_data = actor_data.to(
+                    device=teacher_param.device,
+                    dtype=teacher_param.dtype,
+                    non_blocking=True,
+                )
+            teacher_param.data.mul_(1.0 - update_rate).add_(actor_data, alpha=update_rate)
             param_tensors += 1
             param_elements += teacher_param.numel()
 
@@ -92,6 +107,7 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
         "update_rate": update_rate,
         "param_tensors": param_tensors,
         "param_elements": param_elements,
+        "device_transfer_tensors": device_transfer_tensors,
     }
 
 
