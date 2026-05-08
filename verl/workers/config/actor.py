@@ -203,7 +203,9 @@ class ActorConfig(BaseConfig):
         """Validate actor configuration parameters."""
         assert self.strategy != MISSING
         assert self.rollout_n != MISSING
-        if not self.use_dynamic_bsz:
+        # Skip PPO micro batch validation for forward-only ref models (EMA teacher, KL ref)
+        _is_forward_only = getattr(getattr(self, "fsdp_config", None), "forward_only", False)
+        if not self.use_dynamic_bsz and not _is_forward_only:
             if self.ppo_micro_batch_size is not None and self.ppo_micro_batch_size_per_gpu is not None:
                 raise ValueError(
                     "[actor] You have set both 'actor.ppo_micro_batch_size' AND 'actor.ppo_micro_batch_size_per_gpu'. "
