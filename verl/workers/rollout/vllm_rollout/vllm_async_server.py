@@ -932,6 +932,7 @@ class vLLMReplica(RolloutReplica):
                 "VLLM_USE_V1",
                 "VLLM_ALLREDUCE_USE_SYMM_MEM",
                 "VLLM_LANGUAGE_MODEL_ONLY",
+                "VLLM_RPC_TIMEOUT",
             ):
                 env_value = os.environ.get(env_key)
                 if env_value is not None:
