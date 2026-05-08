@@ -690,6 +690,25 @@ From the old repo:
 - Does the sampled-token vanilla SDPO latest-VERL path deliver learning gains versus the SDPO-paper companion GRPO baseline after full-traj SFT?
 - If the paper later needs a literal DeepSeekMath-reference GRPO ablation, add it as a separate explicitly named ablation rather than changing the main SDPO companion baseline.
 
+### 2026-05-08 GRPO vLLM-V1 clean-300-v2 step 270 canonical test20 eval
+
+- Eval completed on west P5 with merged FSDP→HF checkpoint.
+- Root cause of initial smoke failure: `huggingface/` directory only had config/tokenizer, no weight files. GRPO training saves FSDP shards by default; standalone vLLM `LLM()` requires HF-format weights. Fixed by running `python3 scripts/legacy_model_merger.py merge --backend fsdp --local_dir <actor_dir> --target_dir <actor_dir>/huggingface`.
+- Same grid as prior evals: 3 seeds (42/123/456), val_n=4, 20 canonical test tasks, MAX_MODEL_LEN=49152, vLLM V1, 8 GPU parallel.
+- Parser: fixed and confirmed (`PARSER_SANITY_CHECK=PASS`, int types for numeric XML params).
+- **Results**: pass^1=**0.512**, pass^2=**0.437**, pass^3=**0.405**, pass^4=**0.389**.
+- Comparison with GRPO step 300 (old r16k run, v4 fixed-parser eval):
+  - pass^1: 0.362 → **0.512** (+15pp)
+  - pass^4: 0.308 → **0.389** (+8pp)
+- Per-task highlights:
+  - Perfect (1.00): tasks 2, 6, 13, 26, 31, 45, 48 (7 tasks)
+  - Strong (≥0.50): tasks 8 (0.42), 19 (0.42), 22 (0.50), 35 (0.92), 37 (0.58)
+  - Zero: tasks 16, 18, 24, 29, 32, 44 (6 tasks — hard/context-limited)
+- Interpretation: step 270 from the clean vLLM-V1 GRPO run is substantially stronger than step 300 from the old r16k run. The improvement is likely due to: (a) cleaner training without parser-induced reward noise, (b) vLLM V1 prefix caching enabling longer coherent rollouts, (c) step 270 being pre-overfit relative to step 300.
+- This is now the **GRPO baseline** for SDPO comparison: pass^1=0.512 on canonical test20.
+- Artifact: `research/diagnostics/eval_grpo_vllm_v1_clean_300_v2_step270_test20_3seed.tar.gz`.
+- Lesson: always merge FSDP shards before standalone eval. For future GRPO runs, include `"hf_model"` in `CHECKPOINT_SAVE_CONTENTS` for steps expected to be evaluated.
+
 ## Guardrails
 
 - Keep this fork focused on execution and migration docs; do not turn it into an evidence mirror.
