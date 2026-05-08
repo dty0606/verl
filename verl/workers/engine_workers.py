@@ -539,8 +539,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             with open_dict(self.config.ref):
                 self.config.ref.ppo_mini_batch_size = self.config.actor.ppo_mini_batch_size
                 self.config.ref.ppo_micro_batch_size = self.config.ref.pop("log_prob_micro_batch_size", None)
-                self.config.ref.ppo_micro_batch_size_per_gpu = self.config.ref.pop(
-                    "log_prob_micro_batch_size_per_gpu", None
+                log_prob_micro_batch_size_per_gpu = self.config.ref.pop("log_prob_micro_batch_size_per_gpu", None)
+                self.config.ref.ppo_micro_batch_size_per_gpu = (
+                    log_prob_micro_batch_size_per_gpu
+                    if log_prob_micro_batch_size_per_gpu is not None
+                    else self.config.ref.get("ppo_micro_batch_size_per_gpu", None)
                 )
                 self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
