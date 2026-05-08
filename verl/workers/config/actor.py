@@ -100,6 +100,10 @@ class PolicyLossConfig(BaseConfig):
     sdpo_alpha: float = 1.0
     sdpo_is_clip: Optional[float] = 2.0
     sdpo_loss_coef: float = 1.0
+    sdpo_full_logit_distillation: bool = False
+    sdpo_distillation_topk: int = 100
+    sdpo_distillation_add_tail: bool = True
+    sdpo_topk_source: str = "student_pre_update"
 
 
 @dataclass
