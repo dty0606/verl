@@ -66,6 +66,7 @@ from verl.utils.ulysses import (
     gather_outputs_and_unpad,
     get_ulysses_sequence_parallel_group,
     set_ulysses_sequence_parallel_group,
+    slice_input_tensor,
     ulysses_pad,
     ulysses_pad_and_slice_inputs,
 )
@@ -1055,6 +1056,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
             data=micro_batch, key="calculate_sum_pi_squared", default=False
         )
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+        distillation_return_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_return_topk", default=False)
+        distillation_gather_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_gather_topk", default=False)
+        distillation_topk = int(tu.get_non_tensor_data(data=micro_batch, key="distillation_topk", default=100))
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1101,8 +1105,41 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 if calculate_sum_pi_squared:
                     sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
 
+                if distillation_return_topk or distillation_gather_topk:
+                    cu_seqlens = input_ids.offsets()
+                    if distillation_gather_topk:
+                        if "teacher_ids" not in micro_batch:
+                            raise ValueError("distillation_gather_topk=True requires teacher_ids in the batch")
+                        topk_indices_rmpad = micro_batch["teacher_ids"].values().to(
+                            device=logits_rmpad.device, dtype=torch.long
+                        )
+                        if self.use_ulysses_sp:
+                            topk_indices_rmpad = slice_input_tensor(
+                                topk_indices_rmpad.unsqueeze(0), dim=1, padding=True
+                            ).squeeze(0)
+                        topk_logits_rmpad = torch.gather(logits_rmpad, dim=-1, index=topk_indices_rmpad)
+                    else:
+                        topk = min(distillation_topk, logits_rmpad.shape[-1])
+                        topk_logits_rmpad, topk_indices_rmpad = torch.topk(logits_rmpad, topk, dim=-1)
+
+                    topk_log_probs_rmpad = topk_logits_rmpad - torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
+                    if self.use_ulysses_sp:
+                        pad_size = output_args["pad_size"]
+                        topk_log_probs_rmpad = gather_outputs_and_unpad(
+                            topk_log_probs_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
+                        )
+                        topk_indices_rmpad = gather_outputs_and_unpad(
+                            topk_indices_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
+                        )
+                    model_output["teacher_logprobs"] = torch.nested.nested_tensor_from_jagged(
+                        topk_log_probs_rmpad, cu_seqlens
+                    )
+                    model_output["teacher_ids"] = torch.nested.nested_tensor_from_jagged(topk_indices_rmpad, cu_seqlens)
+
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
                 if distillation_use_topk:
+                    if logits_processor_func is None:
+                        raise ValueError("distillation_use_topk=True requires a logits processor/loss function")
                     outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                     cu_seqlens = input_ids.offsets()
                     for k, v in outputs.items():

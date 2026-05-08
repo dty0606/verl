@@ -15,6 +15,7 @@
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
@@ -22,8 +23,108 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
+from verl.utils.ulysses import get_ulysses_sequence_parallel_world_size, slice_input_tensor
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
+
+
+def _add_tail_log_prob(log_probs: torch.Tensor) -> torch.Tensor:
+    """Append a residual probability bucket for top-k distillation."""
+    log_s = torch.logsumexp(log_probs, dim=-1, keepdim=True)
+    log_s = torch.clamp(log_s, max=-1e-7)
+    tail_log = torch.log(-torch.expm1(log_s))
+    return torch.cat([log_probs, tail_log], dim=-1)
+
+
+def _renormalize_topk_log_probs(log_probs: torch.Tensor) -> torch.Tensor:
+    return log_probs - torch.logsumexp(log_probs, dim=-1, keepdim=True)
+
+
+def _sdpo_jensen_shannon_topk_loss(
+    *,
+    student_topk_log_probs: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    alpha: float,
+    add_tail: bool,
+) -> torch.Tensor:
+    """Official-SDPO-style top-k distribution loss.
+
+    ``alpha=0`` is forward KL, ``alpha=1`` is reverse KL, and values in
+    between are generalized Jensen-Shannon distillation. This intentionally
+    matches the upstream SDPO implementation, including the special-cased KL
+    endpoints and the unnormalized interior JSD expression.
+    """
+    teacher_topk_log_probs = teacher_topk_log_probs.detach()
+    if add_tail:
+        student_distill_log_probs = _add_tail_log_prob(student_topk_log_probs)
+        teacher_distill_log_probs = _add_tail_log_prob(teacher_topk_log_probs)
+    else:
+        student_distill_log_probs = _renormalize_topk_log_probs(student_topk_log_probs)
+        teacher_distill_log_probs = _renormalize_topk_log_probs(teacher_topk_log_probs)
+
+    if alpha == 0.0:
+        kl_loss = F.kl_div(student_distill_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
+    elif alpha == 1.0:
+        kl_loss = F.kl_div(teacher_distill_log_probs, student_distill_log_probs, reduction="none", log_target=True)
+    else:
+        alpha_tensor = torch.tensor(alpha, dtype=student_distill_log_probs.dtype, device=student_distill_log_probs.device)
+        mixture_log_probs = torch.logsumexp(
+            torch.stack(
+                [
+                    student_distill_log_probs + torch.log1p(-alpha_tensor),
+                    teacher_distill_log_probs + torch.log(alpha_tensor),
+                ]
+            ),
+            dim=0,
+        )
+        kl_teacher = F.kl_div(mixture_log_probs, teacher_distill_log_probs, reduction="none", log_target=True)
+        kl_student = F.kl_div(mixture_log_probs, student_distill_log_probs, reduction="none", log_target=True)
+        kl_loss = torch.lerp(kl_student, kl_teacher, alpha_tensor)
+
+    return kl_loss.sum(dim=-1)
+
+
+def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tensor, data: TensorDict) -> dict[str, torch.Tensor]:
+    """Compute SDPO top-k distribution losses during actor forward."""
+    if "teacher_logprobs" not in data or "teacher_ids" not in data:
+        raise ValueError("SDPO top-k distillation requires teacher_logprobs and teacher_ids in the batch")
+
+    teacher_topk_log_probs = data["teacher_logprobs"]
+    teacher_topk_ids = data["teacher_ids"]
+    if not teacher_topk_log_probs.is_nested or not teacher_topk_ids.is_nested:
+        raise ValueError("SDPO top-k distillation expects no-padding nested teacher_logprobs/teacher_ids")
+
+    teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0).to(student_logits.device)
+    teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0).to(device=student_logits.device, dtype=torch.long)
+
+    if get_ulysses_sequence_parallel_world_size() > 1:
+        teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1)
+        teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1)
+
+    if teacher_topk_log_probs.shape[:2] != student_logits.shape[:2]:
+        raise ValueError(
+            "SDPO top-k teacher tensors must align with actor logits; "
+            f"got teacher={tuple(teacher_topk_log_probs.shape)} actor={tuple(student_logits.shape)}"
+        )
+
+    student_log_probs = F.log_softmax(student_logits, dim=-1)
+    student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
+
+    alpha = float(config.policy_loss.get("sdpo_alpha", 0.5))
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"SDPO alpha must be in [0, 1], got {alpha}")
+    add_tail = bool(config.policy_loss.get("sdpo_distillation_add_tail", True))
+    per_token_loss = _sdpo_jensen_shannon_topk_loss(
+        student_topk_log_probs=student_topk_log_probs,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+        alpha=alpha,
+        add_tail=add_tail,
+    )
+    return {
+        "sdpo_distillation_losses": per_token_loss,
+        "sdpo_student_mass": student_topk_log_probs.exp().sum(dim=-1),
+        "sdpo_teacher_mass": teacher_topk_log_probs.exp().sum(dim=-1),
+    }
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -55,12 +156,22 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
-def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+def ppo_loss(config: ActorConfig, model_output=None, data: TensorDict = None, dp_group=None, student_logits=None, **kwargs):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+    if student_logits is not None:
+        return _sdpo_topk_logits_processor(config, student_logits=student_logits, data=data)
+
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
+    sdpo_full_logit_losses = None
+    sdpo_student_mass = None
+    sdpo_teacher_mass = None
+    if model_output.get("sdpo_distillation_losses", None) is not None:
+        sdpo_full_logit_losses = no_padding_2_padding(model_output["sdpo_distillation_losses"], data)
+        sdpo_student_mass = no_padding_2_padding(model_output["sdpo_student_mass"], data)
+        sdpo_teacher_mass = no_padding_2_padding(model_output["sdpo_teacher_mass"], data)
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
@@ -96,6 +207,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         if missing:
             raise ValueError(f"SDPO loss requires {sorted(missing)} in the training batch")
         fields.extend(["teacher_logprobs", "self_distillation_mask"])
+        if "teacher_ids" in data:
+            fields.append("teacher_ids")
+        if "self_distillation_target_token_mask" in data:
+            fields.append("self_distillation_target_token_mask")
         if "self_distillation_loss_mask" in data:
             fields.append("self_distillation_loss_mask")
     data = data.select(*fields).to_padded_tensor()
@@ -112,8 +227,11 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         teacher_log_prob = data["teacher_logprobs"]
         if teacher_log_prob.dim() == 3 and teacher_log_prob.size(-1) == 1:
             teacher_log_prob = teacher_log_prob.squeeze(-1)
-        sdpo_loss_mask = data.get("self_distillation_loss_mask", response_mask).to(response_mask.dtype)
-        sdpo_loss_mask = sdpo_loss_mask * data["self_distillation_mask"].to(sdpo_loss_mask.dtype).unsqueeze(1)
+        if "self_distillation_target_token_mask" in data:
+            sdpo_loss_mask = data["self_distillation_target_token_mask"].to(response_mask.dtype)
+        else:
+            sdpo_loss_mask = data.get("self_distillation_loss_mask", response_mask).to(response_mask.dtype)
+            sdpo_loss_mask = sdpo_loss_mask * data["self_distillation_mask"].to(sdpo_loss_mask.dtype).unsqueeze(1)
         sdpo_batch_num_tokens = sdpo_loss_mask.sum().to(log_prob.device)
         sdpo_global_batch_size = (sdpo_loss_mask.sum(dim=-1) > 0).sum().to(log_prob.device)
         if dp_group is not None and dist.is_available() and dist.is_initialized():
@@ -130,10 +248,21 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             }
         else:
             alpha = float(config.policy_loss.get("sdpo_alpha", 1.0))
-            if alpha != 1.0:
-                raise ValueError("Latest-VERL vanilla SDPO currently supports response-token reverse KL only (alpha=1.0)")
-            log_ratio = log_prob - teacher_log_prob
-            per_token_loss = log_ratio.detach() * log_prob
+            full_logit_distillation = bool(config.policy_loss.get("sdpo_full_logit_distillation", False))
+            if full_logit_distillation:
+                if sdpo_full_logit_losses is None:
+                    raise ValueError(
+                        "SDPO full-logit/top-k distillation is enabled but actor forward did not produce "
+                        "sdpo_distillation_losses. Check distillation_use_topk/teacher_ids wiring."
+                    )
+                per_token_loss = sdpo_full_logit_losses
+            else:
+                if alpha != 1.0:
+                    raise ValueError("Sampled-token SDPO supports reverse KL only (alpha=1.0)")
+                if teacher_log_prob.dim() == 3 and teacher_log_prob.size(-1) != 1:
+                    raise ValueError("Sampled-token SDPO received top-k teacher_logprobs; enable full-logit distillation")
+                log_ratio = log_prob - teacher_log_prob
+                per_token_loss = log_ratio.detach() * log_prob
             is_clip = config.policy_loss.get("sdpo_is_clip", 2.0)
             if is_clip is not None:
                 negative_approx_kl = torch.clamp((log_prob - old_log_prob).detach(), min=-20.0, max=20.0)
@@ -160,7 +289,18 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
                 "self_distillation/token_fraction": (
                     sdpo_loss_mask.float().sum() / response_mask.float().sum().clamp(min=1.0)
                 ).detach().item(),
+                "self_distillation/full_logit_distillation": 1.0 if full_logit_distillation else 0.0,
+                "self_distillation/alpha": alpha,
             }
+            if sdpo_student_mass is not None and sdpo_teacher_mass is not None:
+                selected = sdpo_loss_mask.bool()
+                if bool(selected.any().item()):
+                    pg_metrics["self_distillation/student_topk_mass"] = (
+                        sdpo_student_mass[selected].float().mean().detach().item()
+                    )
+                    pg_metrics["self_distillation/teacher_topk_mass"] = (
+                        sdpo_teacher_mass[selected].float().mean().detach().item()
+                    )
     else:
         policy_loss_fn = get_policy_loss_fn(loss_mode)
         pg_loss, pg_metrics = policy_loss_fn(

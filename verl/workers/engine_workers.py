@@ -57,6 +57,44 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torch.nn.Module, update_rate: float) -> dict:
+    """In-place EMA update for two same-shaped modules."""
+    update_rate = float(update_rate)
+    if update_rate <= 0.0:
+        return {"updated": False, "update_rate": update_rate, "param_tensors": 0, "param_elements": 0}
+    if update_rate > 1.0:
+        raise ValueError(f"EMA update_rate must be <= 1.0, got {update_rate}")
+
+    actor_params = list(actor_module.named_parameters())
+    teacher_params = list(teacher_module.named_parameters())
+    if len(actor_params) != len(teacher_params):
+        raise RuntimeError(f"Parameter count mismatch for EMA: {len(teacher_params)} != {len(actor_params)}")
+
+    param_tensors = 0
+    param_elements = 0
+    with torch.no_grad():
+        for (teacher_name, teacher_param), (actor_name, actor_param) in zip(teacher_params, actor_params):
+            if teacher_name != actor_name:
+                raise RuntimeError(f"Parameter name mismatch for EMA: {teacher_name!r} != {actor_name!r}")
+            if teacher_param.shape != actor_param.shape:
+                raise RuntimeError(
+                    f"Parameter shape mismatch for {teacher_name}: "
+                    f"{tuple(teacher_param.shape)} != {tuple(actor_param.shape)}"
+                )
+            if not teacher_param.is_floating_point():
+                continue
+            teacher_param.data.mul_(1.0 - update_rate).add_(actor_param.data.detach(), alpha=update_rate)
+            param_tensors += 1
+            param_elements += teacher_param.numel()
+
+    return {
+        "updated": True,
+        "update_rate": update_rate,
+        "param_tensors": param_tensors,
+        "param_elements": param_elements,
+    }
+
+
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
 
@@ -506,6 +544,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
                 self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                 self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop("log_prob_max_token_len_per_gpu", None)
+                # The SDPO EMA teacher is forward-only. Persist only model
+                # shards so resume restores teacher weights without expecting
+                # optimizer/scheduler state for the ref worker.
+                if "checkpoint" in self.config.ref:
+                    self.config.ref.checkpoint.save_contents = ["model"]
+                    self.config.ref.checkpoint.load_contents = ["model"]
             ref_config: ActorConfig = omega_conf_to_dataclass(self.config.ref)
 
             # The ref model does not need to enable MTP; force it to false.
@@ -649,14 +693,66 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def update_sdpo_ema_teacher(self, update_rate: float) -> dict:
+        """Move the colocated ref model toward the actor with EMA.
+
+        This mirrors the original SDPO implementation's
+        ``teacher_regularization=ema`` path, using the model-engine ref worker
+        as the self-teacher. It intentionally updates parameters only; the ref
+        model has no optimizer state in forward-only mode.
+        """
+        if self.ref is None:
+            raise RuntimeError(
+                "Tau3 SDPO EMA teacher requires ActorRolloutRefWorker with a colocated ref model. "
+                "Set tau3.sdpo.teacher_backend=actor_snapshot to use the current actor snapshot instead."
+            )
+
+        device = get_device_name()
+        self.actor.engine.to(device=device, model=True, optimizer=False, grad=False)
+        self.ref.engine.to(device=device, model=True, optimizer=False, grad=False)
+
+        actor_module = getattr(self.actor.engine, "module", None)
+        teacher_module = getattr(self.ref.engine, "module", None)
+        if actor_module is None or teacher_module is None:
+            raise NotImplementedError(
+                "SDPO EMA teacher update currently supports model engines exposing `.module` "
+                f"(actor={type(self.actor.engine).__name__}, ref={type(self.ref.engine).__name__})."
+            )
+
+        metrics = ema_update_module_params(teacher_module, actor_module, update_rate)
+        if self.ref.engine.is_param_offload_enabled:
+            self.ref.engine.to(device="cpu", model=True, optimizer=False, grad=False)
+        aggressive_empty_cache(force_sync=True)
+        return metrics
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
         self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
+        if self._should_checkpoint_sdpo_ema_teacher():
+            teacher_path = os.path.join(local_path, "sdpo_ema_teacher")
+            if not os.path.isdir(teacher_path):
+                raise FileNotFoundError(
+                    "Tau3 SDPO EMA teacher checkpoint is missing. "
+                    f"Expected {teacher_path}. Resuming an EMA-teacher SDPO run from an actor-only checkpoint "
+                    "would silently reset the teacher, so this is blocked. "
+                    "Use a checkpoint created after EMA teacher saving was enabled, or run from scratch."
+                )
+            self.ref.load_checkpoint(teacher_path, hdfs_path=None, del_local_after_load=del_local_after_load)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+        if self._should_checkpoint_sdpo_ema_teacher():
+            teacher_path = os.path.join(local_path, "sdpo_ema_teacher")
+            self.ref.save_checkpoint(teacher_path, hdfs_path=None, global_step=global_step, max_ckpt_to_keep=None)
+
+    def _should_checkpoint_sdpo_ema_teacher(self) -> bool:
+        if self.ref is None or self.actor is None:
+            return False
+        policy_loss = self.config.actor.get("policy_loss", {}) if self.config is not None else {}
+        return str(policy_loss.get("loss_mode", "vanilla")).lower() == "sdpo"
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):

@@ -83,14 +83,15 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     # (bsz, seqlen, topk)
     teacher_logprobs = data.get("teacher_logprobs", None)
     teacher_ids = data.get("teacher_ids", None)
-    if teacher_logprobs is not None and teacher_ids is not None:
+    if teacher_logprobs is not None:
         teacher_logprobs_rmpad = index_first_axis(teacher_logprobs.unsqueeze(-1).flatten(0, 1), indices)
-        teacher_ids_rmpad = index_first_axis(teacher_ids.unsqueeze(-1).flatten(0, 1), indices)
         teacher_logprobs_nested = torch.nested.nested_tensor_from_jagged(
             teacher_logprobs_rmpad.squeeze(-1), offsets=cu_seqlens
         )
-        teacher_ids_nested = torch.nested.nested_tensor_from_jagged(teacher_ids_rmpad.squeeze(-1), offsets=cu_seqlens)
         data["teacher_logprobs"] = teacher_logprobs_nested
+    if teacher_ids is not None:
+        teacher_ids_rmpad = index_first_axis(teacher_ids.unsqueeze(-1).flatten(0, 1), indices)
+        teacher_ids_nested = torch.nested.nested_tensor_from_jagged(teacher_ids_rmpad.squeeze(-1), offsets=cu_seqlens)
         data["teacher_ids"] = teacher_ids_nested
 
     return data

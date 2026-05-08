@@ -79,6 +79,25 @@ def need_reference_policy(
     return config.algorithm.get("use_kl_in_reward", False) or config.actor_rollout_ref.actor.use_kl_loss
 
 
+def need_sdpo_ema_teacher(
+    config: DictConfig,
+) -> bool:
+    """Whether Tau3 SDPO needs a dedicated EMA teacher model.
+
+    Latest-VERL's model-engine path can compute SDPO teacher logprobs from the
+    actor snapshot, but the original SDPO implementation keeps a separate
+    teacher and updates it with EMA. Tau3 enables that faithful path via
+    ``tau3.sdpo.teacher_backend=ema_ref``.
+    """
+    sdpo_cfg = config.get("tau3", {}).get("sdpo", {}) or {}
+    policy_loss_cfg = config.actor_rollout_ref.actor.get("policy_loss", {}) or {}
+    return (
+        policy_loss_cfg.get("loss_mode", "vanilla") == "sdpo"
+        and bool(sdpo_cfg.get("enabled", True))
+        and str(sdpo_cfg.get("teacher_backend", "actor_snapshot")).lower() in {"ema_ref", "ema"}
+    )
+
+
 def need_teacher_policy(
     config: DictConfig,
 ) -> bool:

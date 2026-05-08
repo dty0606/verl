@@ -1,0 +1,54 @@
+import pytest
+
+omegaconf = pytest.importorskip("omegaconf")
+torch = pytest.importorskip("torch")
+
+OmegaConf = omegaconf.OmegaConf
+
+from verl.trainer.ppo.utils import need_sdpo_ema_teacher
+from verl.workers.engine_workers import ema_update_module_params
+
+
+def test_need_sdpo_ema_teacher_only_for_sdpo_ema_ref():
+    cfg = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "actor": {
+                    "use_kl_loss": False,
+                    "policy_loss": {"loss_mode": "sdpo"},
+                }
+            },
+            "algorithm": {"use_kl_in_reward": False},
+            "tau3": {"sdpo": {"enabled": True, "teacher_backend": "ema_ref"}},
+        }
+    )
+    assert need_sdpo_ema_teacher(cfg)
+
+    cfg.tau3.sdpo.teacher_backend = "actor_snapshot"
+    assert not need_sdpo_ema_teacher(cfg)
+
+    cfg.actor_rollout_ref.actor.policy_loss.loss_mode = "vanilla"
+    cfg.tau3.sdpo.teacher_backend = "ema_ref"
+    assert not need_sdpo_ema_teacher(cfg)
+
+
+def test_ema_update_module_params_moves_teacher_toward_actor():
+    teacher = torch.nn.Linear(2, 1, bias=False)
+    actor = torch.nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        teacher.weight.fill_(0.0)
+        actor.weight.fill_(1.0)
+
+    metrics = ema_update_module_params(teacher, actor, update_rate=0.25)
+
+    assert metrics["updated"] is True
+    assert metrics["param_tensors"] == 1
+    assert torch.allclose(teacher.weight, torch.full_like(teacher.weight, 0.25))
+
+
+def test_ema_update_rejects_mismatched_modules():
+    teacher = torch.nn.Linear(2, 1, bias=False)
+    actor = torch.nn.Linear(3, 1, bias=False)
+
+    with pytest.raises(RuntimeError, match="shape mismatch"):
+        ema_update_module_params(teacher, actor, update_rate=0.25)

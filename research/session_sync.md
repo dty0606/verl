@@ -1,6 +1,21 @@
 # Project: latest-VERL tau3 GRPO/SDPO fork
 
-Last Updated: 2026-05-02
+Last Updated: 2026-05-07
+
+### 2026-05-07 Multi-turn SDPO/GRPO masking failure-mode note
+
+- Added `research/multiturn_sdpo_mask_failure_modes.md` as a paper-writing note on transferring GRPO/SDPO to thinking-on multi-turn tool agents.
+- Key framing: original SDPO handles wrong-but-scorable rollouts, while Tau3 exposes wrong-and-corrupted rollouts with runaway thinking, repeated tool loops, or response-budget exhaustion.
+- The note separates paper-aligned SDPO behavior from Tau3-specific hardening: `self_distillation_mask` selects rows with teacher-side corrective context, while Tau3 additionally needs env-error exclusion and target-side overlong/repetition/open-think hygiene.
+- Important claim boundary: official SDPO strips `<think>` from successful demonstrations, but target rollout thinking is still scored unless extra masks are added; the authors' motivation for demo-thinking stripping is not explicitly stated in the paper/docs.
+
+### 2026-05-07 Note-SDPO memory bank builder
+
+- Added `scripts/tau3/build_note_sdpo_bank.py` as the production pipeline for teacher-written decision-note memory banks.
+- The pipeline emits sanitized note-writer prompts from train rollouts, optionally calls an OpenAI-compatible teacher endpoint, then compiles/validates accepted notes into the existing `tau3.sdpo.memory.path` JSONL card format.
+- Deterministic code handles source selection, redaction, schema validation, leakage rejection, and memory-momentum merging; the teacher/self-distilled model writes the semantic note.
+- Added `research/note_sdpo_bank_pipeline.md` with P5 commands for prompt emission, teacher note writing, bank compilation, and SDPO integration flags.
+- Added `tests/utils/test_tau3_note_sdpo_bank_builder.py` covering redaction, leakage rejection, memory-bank compatibility, and support-count merging.
 
 ## Stable State
 
@@ -671,6 +686,19 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Recommended retrieval order: first audit seed cards plus successful raw trajectories/chunks with `random` and `lexical`; then add `dense_hf` CPU or `bedrock_titan` with an embedding cache. Do not wire dense retrieval into live SDPO until latency and retrieval relevance are measured.
 - Retrieval audit has a dedicated CPU test file: `tests/utils/test_tau3_sdpo_memory_retrieval_audit.py`.
 - Rationale for `TAU3_RETRY_STEP_ON_TRANSIENT=0`: replaying outer `env.step(action)` can duplicate transactional writes if the tool state changed before the user-simulator call failed. Prefer retry inside Tau2/LiteLLM user-call handling; the outer layer should mark/mask env errors rather than replay actions.
+
+## 2026-05-07 Faithful Tau3 SDPO Guarded EMA/Top-K Path
+
+- Added explicit Tau3 SDPO teacher backend routing. Default `SDPO_TEACHER_BACKEND=ema_ref` builds an ActorRolloutRef worker, computes teacher logprobs with the colocated ref/self-teacher, updates the actor, then applies `teacher <- (1 - rate) * teacher + rate * actor` with `SDPO_TEACHER_UPDATE_RATE=0.05`.
+- Kept `SDPO_TEACHER_BACKEND=actor_snapshot` as the cheaper latest-VERL approximation. Run names now include the teacher backend so EMA and actor-snapshot SDPO are not conflated.
+- Ported the original SDPO full-logit/top-k loss shape into latest VERL for Tau3. Default launcher/config now use `sdpo_full_logit_distillation=true`, `sdpo_alpha=0.5`, `sdpo_distillation_topk=100`, and `sdpo_distillation_add_tail=true`, matching the paper/code defaults rather than the earlier sampled-token `alpha=1.0` approximation.
+- Latest-VERL implementation detail: because the current model-engine actor update does not expose the colocated EMA teacher inside the loss function the way the old SDPO `dp_actor.py` did, the trainer precomputes actor/student top-k support immediately before the optimizer step, gathers EMA-teacher probabilities on that same support under the reprompted teacher context, then backprops the SDPO JSD/top-k/tail loss during actor update. With the default one-minibatch/one-epoch Tau3 launch this matches the official support choice before parameters move. The trainer now fails fast if `ppo_epochs>1` or multiple actor minibatches are requested, because that would make the precomputed top-k support stale relative to later optimizer steps.
+- Added target-side SDPO guardrails via `tau3.sdpo.target_guard`: nonterminal/budget-exhausted, response saturation, parser-format artifacts (`incorrect_format`), open `<think>`, repetition, and tool-loop rows can be zeroed or downweighted through `corrupted_row_weight`.
+- Successful peer demonstrations are also filtered through the same target-validity guard before being eligible for teacher reprompt context, and `<think>` stripping now removes both closed and unterminated/case-variant think spans. This prevents reward-successful but corrupted trajectories from becoming privileged teacher demonstrations.
+- The guardrail preserves original SDPO row routing (`self_distillation_mask`) but changes the token-level SDPO target mask. The actor loss now consumes an explicit `self_distillation_target_token_mask`.
+- EMA-teacher SDPO checkpoints now save a colocated `actor/sdpo_ema_teacher/` model checkpoint and fail fast on resume if an EMA SDPO checkpoint lacks that teacher state. This avoids silently resetting `teacher <- EMA(student)` to the initial SFT/base model after a crash.
+- New/important metrics: `self_distillation/teacher_backend_ema_ref`, `self_distillation/teacher_backend_actor_snapshot`, `self_distillation/full_logit_distillation`, `self_distillation/distillation_topk`, `self_distillation/student_topk_mass`, `self_distillation/teacher_topk_mass`, `self_distillation/ema_teacher_updated`, `self_distillation/target_guard_selected_fraction`, `self_distillation/target_guard_token_keep_fraction`, and per-reason target-guard fractions.
+- Claim boundary: this is the faithful original-SDPO baseline for Tau3 under the default launch shape, plus Tau3-specific target guardrails. For a no-guard ablation, set `tau3.sdpo.target_guard.enabled=false`; for the old approximation, set `SDPO_FULL_LOGIT_DISTILLATION=false SDPO_ALPHA=1.0`.
 
 ## Evidence Carried Forward
 

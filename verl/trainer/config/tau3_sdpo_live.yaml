@@ -23,7 +23,15 @@ actor_rollout_ref:
     use_kl_loss: False
     policy_loss:
       loss_mode: sdpo
-      sdpo_alpha: 1.0
+      # Match original SDPO defaults: full-logit/top-k distillation with
+      # generalized JSD alpha=0.5 and residual tail bucket.
+      sdpo_full_logit_distillation: True
+      sdpo_alpha: 0.5
+      sdpo_distillation_topk: 100
+      sdpo_distillation_add_tail: True
+      # Latest-VERL computes the actor top-k support just before the optimizer
+      # step, then gathers EMA-teacher probabilities on that same support.
+      sdpo_topk_source: student_pre_update
       sdpo_is_clip: 2.0
       sdpo_loss_coef: 1.0
     optim:
@@ -116,6 +124,28 @@ tau3:
     environment_feedback_only_without_solution: True
     remove_thinking_from_demonstration: True
     serialize_nonstring_feedback: True
+    # Faithful SDPO path: compute teacher logprobs with a dedicated ref copy
+    # and update that copy after each actor update via
+    # teacher <- (1 - rate) * teacher + rate * actor. Set to
+    # actor_snapshot for the cheaper latest-VERL approximation.
+    teacher_backend: ${oc.env:SDPO_TEACHER_BACKEND,ema_ref}
+    teacher_update_rate: ${oc.env:SDPO_TEACHER_UPDATE_RATE,0.05}
+    target_guard:
+      enabled: True
+      # Preserve original SDPO row routing, but prevent corrupted target-side
+      # continuations from contributing actor loss once selected.
+      corrupted_row_weight: 0.0
+      mask_nonterminal: True
+      mask_budget_exhausted: True
+      mask_response_saturated: True
+      mask_parse_error: True
+      mask_open_think: True
+      mask_repetition: True
+      mask_tool_loop: True
+      max_response_tokens: ${data.max_response_length}
+      repetition_ngram_size: 8
+      repetition_max_count: 4
+      max_tool_count: 32
     reprompt_template: |-
       {prompt}{solution}{memory}{feedback}
 

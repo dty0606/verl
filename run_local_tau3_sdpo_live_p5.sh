@@ -91,7 +91,13 @@ case "$SDPO_ARM" in
     feedback|feedback_only|ff_sdpo) SDPO_ARM="feedback_only" ;;
     *) echo "Error: SDPO_ARM must be original, vanilla_peer, or feedback_only"; exit 1 ;;
 esac
-EXP_NAME="LOCAL-TAU3-SDPO-${SDPO_ARM}-${FEEDBACK_MODE}-${MODEL_NAME}-${SUFFIX}"
+SDPO_TEACHER_BACKEND="${SDPO_TEACHER_BACKEND:-ema_ref}"
+case "$SDPO_TEACHER_BACKEND" in
+    ema|ema_ref|paper_ema) SDPO_TEACHER_BACKEND="ema_ref" ;;
+    actor|actor_snapshot|current_actor) SDPO_TEACHER_BACKEND="actor_snapshot" ;;
+    *) echo "Error: SDPO_TEACHER_BACKEND must be ema_ref or actor_snapshot"; exit 1 ;;
+esac
+EXP_NAME="LOCAL-TAU3-SDPO-${SDPO_ARM}-${SDPO_TEACHER_BACKEND}-${FEEDBACK_MODE}-${MODEL_NAME}-${SUFFIX}"
 mkdir -p "$SDPO_OUTPUT_ROOT" "$SDPO_CHECKPOINT_ROOT" logs
 rm -f /dev/shm/verl_dist_store_* 2>/dev/null || true
 
@@ -133,7 +139,11 @@ ARGS=(
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-8}"
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
     "actor_rollout_ref.actor.policy_loss.loss_mode=sdpo"
-    "actor_rollout_ref.actor.policy_loss.sdpo_alpha=${SDPO_ALPHA:-1.0}"
+    "actor_rollout_ref.actor.policy_loss.sdpo_full_logit_distillation=${SDPO_FULL_LOGIT_DISTILLATION:-true}"
+    "actor_rollout_ref.actor.policy_loss.sdpo_alpha=${SDPO_ALPHA:-0.5}"
+    "actor_rollout_ref.actor.policy_loss.sdpo_distillation_topk=${SDPO_DISTILLATION_TOPK:-100}"
+    "actor_rollout_ref.actor.policy_loss.sdpo_distillation_add_tail=${SDPO_DISTILLATION_ADD_TAIL:-true}"
+    "actor_rollout_ref.actor.policy_loss.sdpo_topk_source=${SDPO_TOPK_SOURCE:-student_pre_update}"
     "actor_rollout_ref.actor.policy_loss.sdpo_is_clip=${SDPO_IS_CLIP:-2.0}"
     "actor_rollout_ref.actor.policy_loss.sdpo_loss_coef=${SDPO_LOSS_COEF:-1.0}"
     "actor_rollout_ref.rollout.n=${ROLLOUT_BATCH_SIZE:-8}"
@@ -147,12 +157,27 @@ ARGS=(
     "algorithm.adv_estimator=grpo"
     "tau3.sdpo.max_reprompt_len=${SDPO_MAX_REPROMPT_LEN:-16384}"
     "tau3.sdpo.reprompt_truncation=${SDPO_REPROMPT_TRUNCATION:-right}"
+    "tau3.sdpo.teacher_backend=${SDPO_TEACHER_BACKEND:-ema_ref}"
+    "tau3.sdpo.teacher_update_rate=${SDPO_TEACHER_UPDATE_RATE:-0.05}"
     "tau3.sdpo.memory.enabled=${SDPO_MEMORY_ENABLED:-false}"
     "tau3.sdpo.memory.path=${SDPO_MEMORY_PATH:-}"
     "tau3.sdpo.memory.mode=${SDPO_MEMORY_MODE:-relevant}"
     "tau3.sdpo.memory.inject_when=${SDPO_MEMORY_INJECT_WHEN:-no_solution}"
     "tau3.sdpo.memory.fail_on_error=${SDPO_MEMORY_FAIL_ON_ERROR:-true}"
     "tau3.sdpo.memory.allow_without_feedback=${SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK:-false}"
+    "tau3.sdpo.target_guard.enabled=${SDPO_TARGET_GUARD_ENABLED:-true}"
+    "tau3.sdpo.target_guard.corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0}"
+    "tau3.sdpo.target_guard.mask_nonterminal=${SDPO_TARGET_GUARD_MASK_NONTERMINAL:-true}"
+    "tau3.sdpo.target_guard.mask_budget_exhausted=${SDPO_TARGET_GUARD_MASK_BUDGET_EXHAUSTED:-true}"
+    "tau3.sdpo.target_guard.mask_response_saturated=${SDPO_TARGET_GUARD_MASK_RESPONSE_SATURATED:-true}"
+    "tau3.sdpo.target_guard.mask_parse_error=${SDPO_TARGET_GUARD_MASK_PARSE_ERROR:-true}"
+    "tau3.sdpo.target_guard.mask_open_think=${SDPO_TARGET_GUARD_MASK_OPEN_THINK:-true}"
+    "tau3.sdpo.target_guard.mask_repetition=${SDPO_TARGET_GUARD_MASK_REPETITION:-true}"
+    "tau3.sdpo.target_guard.mask_tool_loop=${SDPO_TARGET_GUARD_MASK_TOOL_LOOP:-true}"
+    "tau3.sdpo.target_guard.max_response_tokens=${SDPO_TARGET_GUARD_MAX_RESPONSE_TOKENS:-${MAX_RESPONSE_LENGTH:-16384}}"
+    "tau3.sdpo.target_guard.repetition_ngram_size=${SDPO_TARGET_GUARD_REPETITION_NGRAM_SIZE:-8}"
+    "tau3.sdpo.target_guard.repetition_max_count=${SDPO_TARGET_GUARD_REPETITION_MAX_COUNT:-4}"
+    "tau3.sdpo.target_guard.max_tool_count=${SDPO_TARGET_GUARD_MAX_TOOL_COUNT:-32}"
     "trainer.project_name=${PROJECT_NAME:-SDPO-${USER}}"
     "trainer.experiment_name=$EXP_NAME"
     "trainer.total_epochs=${TOTAL_EPOCHS:-300}"
@@ -258,6 +283,9 @@ echo "Rollout n: ${ROLLOUT_BATCH_SIZE:-8}"
 echo "Max response length: ${MAX_RESPONSE_LENGTH:-16384}"
 echo "SDPO max reprompt len: ${SDPO_MAX_REPROMPT_LEN:-16384}"
 echo "SDPO reprompt truncation: ${SDPO_REPROMPT_TRUNCATION:-right}"
+echo "SDPO teacher: backend=${SDPO_TEACHER_BACKEND:-ema_ref} ema_rate=${SDPO_TEACHER_UPDATE_RATE:-0.05}"
+echo "SDPO loss: full_logit=${SDPO_FULL_LOGIT_DISTILLATION:-true} alpha=${SDPO_ALPHA:-0.5} topk=${SDPO_DISTILLATION_TOPK:-100} add_tail=${SDPO_DISTILLATION_ADD_TAIL:-true} topk_source=${SDPO_TOPK_SOURCE:-student_pre_update}"
+echo "SDPO target guard: enabled=${SDPO_TARGET_GUARD_ENABLED:-true} corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0} parse_error=${SDPO_TARGET_GUARD_MASK_PARSE_ERROR:-true} open_think=${SDPO_TARGET_GUARD_MASK_OPEN_THINK:-true} repetition=${SDPO_TARGET_GUARD_MASK_REPETITION:-true}"
 echo "SDPO memory: enabled=${SDPO_MEMORY_ENABLED:-false} mode=${SDPO_MEMORY_MODE:-relevant} inject_when=${SDPO_MEMORY_INJECT_WHEN:-no_solution} allow_without_feedback=${SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK:-false} path=${SDPO_MEMORY_PATH:-<unset>}"
 echo "vLLM profile: $TAU3_VLLM_PROFILE"
 echo "VLLM_USE_V1: ${VLLM_USE_V1:-<unset>}"

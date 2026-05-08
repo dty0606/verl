@@ -125,6 +125,7 @@ class TaskRunner:
         """Add actor rollout worker using the unified model engine implementation."""
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
+        from verl.trainer.ppo.utils import need_sdpo_ema_teacher
         from verl.workers.engine_workers import ActorRolloutRefWorker
 
         actor_rollout_cls = ActorRolloutRefWorker
@@ -134,8 +135,10 @@ class TaskRunner:
         if lora_rank <= 0:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-        # Ref policy is fused into ActorRolloutRefWorker unless LoRA is used with a dedicated ref model.
-        if need_reference_policy(config) and not ref_in_actor:
+        # Ref policy is fused into ActorRolloutRefWorker unless LoRA is used
+        # with a dedicated ref model. Tau3 faithful SDPO also uses this ref
+        # slot as the EMA self-teacher.
+        if (need_reference_policy(config) or need_sdpo_ema_teacher(config)) and not ref_in_actor:
             role = Role.ActorRolloutRef
         else:
             role = Role.ActorRollout

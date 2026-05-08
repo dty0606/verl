@@ -1060,48 +1060,11 @@ grep -E "training/global_step|actor/pg_loss|self_distillation|tau3_live" \
 df -h /home/sagemaker-user /mnt/sagemaker-nvme
 ```
 
-```bash
-cd ~/verl_tau3_sdpo
-
-export HF_CKPT=<path to final SFT global_step_*/huggingface>
-export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
-export TAU3_LIVE_RUNTIME=official_gym
-export MODEL_PATH="$HF_CKPT"
-export ENABLE_THINKING=true
-export VLLM_LANGUAGE_MODEL_ONLY=true
-export N_GPUS_PER_NODE=8
-export ROLLOUT_TP_SIZE=1
-export TRAIN_BATCH_SIZE=8
-export ROLLOUT_BATCH_SIZE=8
-export PPO_MINI_BATCH_SIZE=8
-export VAL_N=4
-export TOTAL_TRAINING_STEPS=300
-export TOTAL_EPOCHS=300
-export TEST_FREQ=30
-export SAVE_FREQ=30
-export LR=1e-6
-export LR_WARMUP_STEPS=0
-export MAX_PROMPT_LENGTH=16384
-export MAX_RESPONSE_LENGTH=12288
-export MAX_MODEL_LEN=32768
-export SDPO_ALPHA=1.0
-export SDPO_LOSS_COEF=1.0
-export SDPO_IS_CLIP=2.0
-export SDPO_MAX_REPROMPT_LEN=8192
-export SDPO_REPROMPT_TRUNCATION=right
-export ROLLOUT_TEMPERATURE=0.4
-export ROLLOUT_TOP_P=0.95
-export VAL_TEMPERATURE=0.4
-export VAL_TOP_P=0.95
-export PYTORCH_ALLOC_CONF=expandable_segments:True
-
-ROLLOUT_DATA_DIR=outputs/sdpo_full_sft_baseline/rollout_data \
-bash run_local_tau3_sdpo_live_p5.sh \
-  datasets/tau3_live_airline_canonical_json \
-  sdpo_full_sft_baseline \
-  json \
-  2>&1 | tee logs/sdpo_full_sft_baseline.log
-```
+Do not use the older inline `~/verl_tau3_sdpo` command from pre-vLLM-V1 notes
+for claim-bearing original-SDPO runs. It used the legacy sampled-token
+`SDPO_ALPHA=1.0` path and shorter `12288/32768` length settings. The supported
+baseline path is the east helper above, which forces memory off and uses the
+guarded original-style SDPO defaults documented in `research/session_sync.md`.
 
 Track at minimum: terminal/nonterminal fractions, budget-exhausted fraction,
 turn/tool counts, response clip ratio, success count, tokens per success,

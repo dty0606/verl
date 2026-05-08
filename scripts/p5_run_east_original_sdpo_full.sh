@@ -7,6 +7,11 @@ set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$PROJECT_ROOT"
 
+if [ -z "${CONDA_PREFIX:-}" ]; then
+    echo "ERROR: activate the sdpo-vllm20-v1 conda env before launching this helper." >&2
+    exit 2
+fi
+
 NVME_ROOT="${NVME_ROOT:-/mnt/sagemaker-nvme/tau3_sdpo}"
 RUN_STEM="${RUN_STEM:-east_p5_original_sdpo_vllm_v1_full_300}"
 mkdir -p "$NVME_ROOT"/{tmp,ray_tmp,logs,outputs,output,checkpoints,wandb,cache}
@@ -62,6 +67,8 @@ export SAVE_FREQ="${SAVE_FREQ:-30}"
 export MAX_ACTOR_CKPT_TO_KEEP="${MAX_ACTOR_CKPT_TO_KEEP:-3}"
 export MODE=sdpo
 export SDPO_ARM=original
+export SDPO_MEMORY_ENABLED=false
+export SDPO_MEMORY_PATH=""
 export CONTINUE_ON_FAIL="${CONTINUE_ON_FAIL:-0}"
 export CAPACITY_PROFILES="${CAPACITY_PROFILES:-02_auto_prefix_24k_48k}"
 export PROJECT_NAME="${PROJECT_NAME:-SDPO-vllm-v1-original-sdpo}"
@@ -87,6 +94,7 @@ echo "Tau3 Bedrock retries: max=$TAU3_BEDROCK_MAX_RETRIES delays=$TAU3_BEDROCK_R
 echo "Tau3 env-error guardrails: mask=$TAU3_MASK_ENV_ERROR_ROLLOUTS skip_threshold=$TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD"
 echo "Tau3 user args: $TAU3_LIVE_USER_ARGS_JSON"
 echo "Tau3 outer step retry enabled: $TAU3_RETRY_STEP_ON_TRANSIENT"
+echo "SDPO memory forced off for original baseline: enabled=$SDPO_MEMORY_ENABLED"
 echo "----------------------------------------------------------------"
 df -h /home/sagemaker-user /mnt/sagemaker-nvme || true
 

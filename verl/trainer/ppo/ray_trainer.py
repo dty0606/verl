@@ -59,6 +59,7 @@ from verl.trainer.ppo.utils import (
     need_critic,
     need_reference_policy,
     need_reward_model,
+    need_sdpo_ema_teacher,
     need_teacher_policy,
 )
 from verl.utils import tensordict_utils as tu
@@ -71,6 +72,7 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.tau3_sdpo_target_guard import build_sdpo_target_guard_mask
 from verl.utils.tau3_sdpo_memory import load_memory_bank, render_memory_section, strip_thinking
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -295,6 +297,7 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
+        self.use_sdpo_ema_teacher = need_sdpo_ema_teacher(self.config)
         self.use_teacher_policy = need_teacher_policy(self.config)
 
         self.use_rm = need_reward_model(self.config)
@@ -823,7 +826,7 @@ class RayPPOTrainer:
             value_loss_ = partial(value_loss, config=orig_critic_cfg)
             self.critic_wg.set_loss_fn(value_loss_)
 
-        if self.use_reference_policy and not self.ref_in_actor:
+        if (self.use_reference_policy or self.use_sdpo_ema_teacher) and not self.ref_in_actor:
             if str(Role.RefPolicy) in all_wg:
                 self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
                 self.ref_policy_wg.init_model()
@@ -1232,6 +1235,151 @@ class RayPPOTrainer:
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
+    def _compute_sdpo_ema_teacher_log_prob(self, batch: DataProto):
+        if self.ref_in_actor:
+            raise RuntimeError(
+                "Tau3 SDPO teacher_backend=ema_ref requires a dedicated ref model; "
+                "LoRA/ref-in-actor mode cannot maintain a separate EMA teacher."
+            )
+        if not hasattr(self, "ref_policy_wg") or self.ref_policy_wg is None:
+            raise RuntimeError(
+                "Tau3 SDPO teacher_backend=ema_ref requires ActorRolloutRefWorker. "
+                "Check need_sdpo_ema_teacher() and role wiring."
+            )
+
+        batch_td = batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+        tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
+        output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+        log_probs = tu.get(output, "log_probs")
+        metrics = tu.get(output, "metrics") or {}
+        log_probs = no_padding_2_padding(log_probs, batch_td)
+        teacher_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()}))
+        return teacher_log_prob, float(metrics.get("mfu", 0.0) or 0.0)
+
+    @staticmethod
+    def _response_topk_to_full_prediction_tensor(batch: DataProto, response_topk: torch.Tensor) -> torch.Tensor:
+        """Place response-token top-k tensors on full-sequence prediction positions.
+
+        ``no_padding_2_padding`` extracts response log-probs from the logits at
+        positions ``prompt_last, response_0, ..., response_{n-2}``. To feed the
+        same representation back through ``left_right_2_no_padding``, we need to
+        place each response token's top-k support at those prediction positions,
+        not at the token positions themselves.
+        """
+        input_ids = batch.batch["input_ids"]
+        prompts = batch.batch["prompts"]
+        responses = batch.batch["responses"]
+        attention_mask = batch.batch["attention_mask"]
+        batch_size, seq_len = input_ids.shape
+        _, response_len = responses.shape
+        topk = response_topk.shape[-1]
+        full = torch.zeros(
+            batch_size,
+            seq_len,
+            topk,
+            dtype=response_topk.dtype,
+            device=response_topk.device,
+        )
+        response_attention = attention_mask[:, -response_len:]
+        response_lens = response_attention.sum(dim=1).detach().cpu().tolist()
+        prompt_width = prompts.shape[1]
+        for i, resp_len in enumerate(response_lens):
+            resp_len = int(resp_len)
+            if resp_len <= 0:
+                continue
+            prompt_mask = attention_mask[i, :prompt_width].to(torch.bool)
+            prompt_positions = prompt_mask.nonzero(as_tuple=False).flatten()
+            if prompt_positions.numel() == 0:
+                continue
+            prediction_positions = [int(prompt_positions[-1].item())]
+            prediction_positions.extend(range(prompt_width, min(prompt_width + resp_len - 1, seq_len)))
+            keep = min(resp_len, len(prediction_positions))
+            for t in range(keep):
+                full[i, prediction_positions[t], :] = response_topk[i, t, :]
+        return full
+
+    def _compute_sdpo_topk_log_probs(
+        self,
+        batch: DataProto,
+        *,
+        use_ref: bool,
+        gather_response_ids: Optional[torch.Tensor] = None,
+    ) -> tuple[DataProto, float]:
+        """Compute response-position top-k IDs/logprobs for SDPO distillation.
+
+        If ``gather_response_ids`` is absent, this returns the model's own top-k
+        IDs/logprobs. If present, it gathers log-probs on those IDs. This lets us
+        approximate the official SDPO path: actor top-k support first, then EMA
+        teacher probabilities on the same support under the reprompted context.
+        """
+        if use_ref and self.ref_in_actor:
+            raise RuntimeError("SDPO top-k EMA teacher requires a dedicated ref model; ref-in-actor is unsupported.")
+        topk = int(self.config.actor_rollout_ref.actor.policy_loss.get("sdpo_distillation_topk", 100))
+        if topk <= 0:
+            raise ValueError(f"sdpo_distillation_topk must be positive, got {topk}")
+
+        # Clone the TensorDict so temporary teacher_ids do not leak into the caller.
+        topk_batch = DataProto(
+            batch=batch.batch.clone(),
+            non_tensor_batch=dict(batch.non_tensor_batch),
+            meta_info=dict(batch.meta_info),
+        )
+        if gather_response_ids is not None:
+            topk_batch.batch["teacher_ids"] = self._response_topk_to_full_prediction_tensor(
+                topk_batch, gather_response_ids.to(topk_batch.batch["input_ids"].device)
+            )
+
+        batch_td = topk_batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+        metadata = {
+            "calculate_entropy": False,
+            "compute_loss": False,
+            "distillation_topk": topk,
+            "distillation_return_topk": gather_response_ids is None,
+            "distillation_gather_topk": gather_response_ids is not None,
+        }
+        if self.ref_in_actor and not use_ref:
+            metadata["no_lora_adapter"] = False
+        tu.assign_non_tensor(batch_td, **metadata)
+        if use_ref:
+            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+        else:
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        topk_log_probs = tu.get(output, "teacher_logprobs")
+        topk_ids = tu.get(output, "teacher_ids")
+        metrics = tu.get(output, "metrics") or {}
+        topk_log_probs = no_padding_2_padding(topk_log_probs, batch_td).float()
+        topk_ids = no_padding_2_padding(topk_ids, batch_td).to(torch.long)
+        return (
+            DataProto.from_tensordict(
+                tu.get_tensordict({"teacher_logprobs": topk_log_probs, "teacher_ids": topk_ids})
+            ),
+            float(metrics.get("mfu", 0.0) or 0.0),
+        )
+
+    def _maybe_update_sdpo_ema_teacher(self) -> dict[str, float]:
+        if not self.use_sdpo_ema_teacher:
+            return {}
+        sdpo_cfg = self.config.get("tau3", {}).get("sdpo", {}) or {}
+        update_rate = float(sdpo_cfg.get("teacher_update_rate", 0.05))
+        if update_rate <= 0.0:
+            return {
+                "self_distillation/ema_teacher_enabled": 1.0,
+                "self_distillation/ema_teacher_updated": 0.0,
+                "self_distillation/ema_teacher_update_rate": update_rate,
+            }
+        if self.ref_in_actor:
+            raise RuntimeError(
+                "Tau3 SDPO EMA teacher requires a dedicated ref model; ref-in-actor/LoRA mode is unsupported."
+            )
+        self.actor_rollout_wg.update_sdpo_ema_teacher(update_rate)
+        return {
+            "self_distillation/ema_teacher_enabled": 1.0,
+            "self_distillation/ema_teacher_updated": 1.0,
+            "self_distillation/ema_teacher_update_rate": update_rate,
+        }
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1244,11 +1392,16 @@ class RayPPOTrainer:
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
+        policy_loss_cfg = self.config.actor_rollout_ref.actor.policy_loss
+        sdpo_full_logit_distillation = (
+            policy_loss_cfg.get("loss_mode", "vanilla") == "sdpo"
+            and bool(policy_loss_cfg.get("sdpo_full_logit_distillation", False))
+        )
         distillation_use_topk = (
             self.distillation_config.distillation_loss.loss_settings.use_topk
             if is_distillation_enabled(self.config.get("distillation"))
             else False
-        )
+        ) or sdpo_full_logit_distillation
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1258,6 +1411,7 @@ class RayPPOTrainer:
             batch_td,
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
+            distillation_topk=int(policy_loss_cfg.get("sdpo_distillation_topk", 100)),
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,
@@ -1303,7 +1457,10 @@ class RayPPOTrainer:
 
     @staticmethod
     def _remove_thinking_trace(text: str) -> str:
-        return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+        # Demonstrations are teacher context, not training targets. Strip both
+        # closed and unterminated thinking spans so a successful peer cannot
+        # inject runaway/internal traces into the reprompt.
+        return re.sub(r"<think\b[^>]*>.*?(?:</think>|$)", "", text or "", flags=re.DOTALL | re.IGNORECASE).strip()
 
     @staticmethod
     def _decode_masked_response(tokenizer, token_ids: torch.Tensor, mask: torch.Tensor) -> str:
@@ -1413,12 +1570,18 @@ class RayPPOTrainer:
         reward_tensor: torch.Tensor,
         *,
         success_reward_threshold: float,
+        eligible_mask: Optional[torch.Tensor] = None,
     ) -> dict[Any, list[int]]:
         seq_scores = reward_tensor.sum(dim=-1).detach().cpu().tolist()
         uids = list(batch.non_tensor_batch.get("uid", []))
+        eligible = (
+            eligible_mask.detach().cpu().tolist()
+            if eligible_mask is not None
+            else [True] * len(seq_scores)
+        )
         success_by_uid: dict[Any, list[int]] = defaultdict(list)
         for idx, score in enumerate(seq_scores):
-            if idx < len(uids) and float(score) >= success_reward_threshold:
+            if idx < len(uids) and idx < len(eligible) and bool(eligible[idx]) and float(score) >= success_reward_threshold:
                 success_by_uid[uids[idx]].append(idx)
         return success_by_uid
 
@@ -1449,7 +1612,7 @@ class RayPPOTrainer:
         batch: DataProto,
         reward_tensor: torch.Tensor,
         reward_extra_infos_dict: Optional[dict[str, list]] = None,
-    ) -> Optional[tuple[Optional[DataProto], torch.Tensor, dict[str, float]]]:
+    ) -> Optional[tuple[Optional[DataProto], torch.Tensor, torch.Tensor, dict[str, float]]]:
         if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") != "sdpo":
             return None
 
@@ -1478,6 +1641,15 @@ class RayPPOTrainer:
         if bool(env_error_mask.any().item()):
             failed_mask = failed_mask & ~env_error_mask
         failed_mask_list = failed_mask.detach().cpu().tolist()
+        target_guard_cfg = sdpo_cfg.get("target_guard", {}) if sdpo_cfg is not None else {}
+        demo_loss_mask, demo_guard_masks = build_sdpo_target_guard_mask(
+            response_mask=assistant_response_mask,
+            response_texts=response_texts,
+            reward_extra_infos_dict=reward_extra_infos_dict,
+            guard_cfg=target_guard_cfg,
+        )
+        del demo_loss_mask
+        demo_safe_mask = (~demo_guard_masks["guarded"]) & ~env_error_mask
 
         feedback_list = self._collect_feedback(
             include_environment_feedback=bool(sdpo_cfg.get("include_environment_feedback", True)),
@@ -1489,7 +1661,12 @@ class RayPPOTrainer:
 
         use_successful_peer_solution = bool(sdpo_cfg.get("use_successful_peer_solution", False))
         success_by_uid = (
-            self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=success_threshold)
+            self._collect_solutions_by_uid(
+                batch,
+                reward_tensor,
+                success_reward_threshold=success_threshold,
+                eligible_mask=demo_safe_mask,
+            )
             if use_successful_peer_solution
             else {}
         )
@@ -1642,7 +1819,7 @@ class RayPPOTrainer:
                 "self_distillation/memory_used_fraction": 0.0,
                 "self_distillation/memory_load_error": 1.0 if memory_load_error else 0.0,
             }
-            return None, zeros, metrics
+            return None, zeros, assistant_response_mask.to(dtype=torch.float32), metrics
 
         max_reprompt_len = int(sdpo_cfg.get("max_reprompt_len", 8192))
         reprompt_truncation = str(sdpo_cfg.get("reprompt_truncation", "right"))
@@ -1679,6 +1856,12 @@ class RayPPOTrainer:
         )
         teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
         target_mask = torch.tensor(target_mask_values, dtype=torch.float32, device=responses.device)
+        target_loss_mask, target_guard_masks = build_sdpo_target_guard_mask(
+            response_mask=assistant_response_mask,
+            response_texts=response_texts,
+            reward_extra_infos_dict=reward_extra_infos_dict,
+            guard_cfg=target_guard_cfg,
+        )
 
         teacher_batch = DataProto.from_dict(
             tensors={
@@ -1699,6 +1882,10 @@ class RayPPOTrainer:
             "self_distillation/success_sample_fraction": sum(bool(x) for x in solutions_used) / batch_size,
             "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
             "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
+            "self_distillation/demo_guard_success_excluded_fraction": float(
+                (((seq_scores >= success_threshold) & ~demo_safe_mask).float().sum()
+                / (seq_scores >= success_threshold).float().sum().clamp(min=1.0)).item()
+            ),
             "self_distillation/memory_available_fraction": sum(bool(x) for x in memory_available) / batch_size,
             "self_distillation/memory_eligible_fraction": sum(bool(x) for x in memory_eligible) / batch_size,
             "self_distillation/memory_used_fraction": sum(bool(x) for x in memory_used) / batch_size,
@@ -1727,7 +1914,30 @@ class RayPPOTrainer:
                 (teacher_prompt_attention_mask.float().sum(dim=1) >= max_reprompt_len).float().mean().item()
             ),
         }
-        return teacher_batch, target_mask, metrics
+        selected = target_mask.to(torch.bool)
+        selected_count = float(selected.float().sum().item())
+        guarded_selected = target_guard_masks["guarded"] & selected
+        metrics.update(
+            {
+                "self_distillation/target_guard_selected_fraction": (
+                    float(guarded_selected.float().sum().item() / selected_count) if selected_count > 0 else 0.0
+                ),
+                "self_distillation/target_guard_token_keep_fraction": float(
+                    (
+                        (target_loss_mask * target_mask.unsqueeze(1)).sum()
+                        / (assistant_response_mask.float() * target_mask.unsqueeze(1)).sum().clamp(min=1.0)
+                    ).item()
+                ),
+            }
+        )
+        for name, mask in target_guard_masks.items():
+            if name == "guarded":
+                continue
+            reason_selected = mask & selected
+            metrics[f"self_distillation/target_guard_{name}_selected_fraction"] = (
+                float(reason_selected.float().sum().item() / selected_count) if selected_count > 0 else 0.0
+            )
+        return teacher_batch, target_mask, target_loss_mask, metrics
 
     def _maybe_add_sdpo_teacher_logprobs(
         self,
@@ -1739,17 +1949,107 @@ class RayPPOTrainer:
         if teacher_result is None:
             return batch, {}
 
-        teacher_batch, target_mask, metrics = teacher_result
+        teacher_batch, target_mask, target_loss_mask, metrics = teacher_result
+        target_token_mask = target_loss_mask * target_mask.unsqueeze(1)
+        policy_loss_cfg = self.config.actor_rollout_ref.actor.policy_loss
+        full_logit_distillation = bool(policy_loss_cfg.get("sdpo_full_logit_distillation", False))
+        topk = int(policy_loss_cfg.get("sdpo_distillation_topk", 100))
         if teacher_batch is None:
-            batch.batch["teacher_logprobs"] = batch.batch["old_log_probs"].detach().clone()
+            if full_logit_distillation:
+                shape = (*batch.batch["input_ids"].shape, topk)
+                batch.batch["teacher_ids"] = torch.zeros(shape, dtype=torch.long, device=batch.batch["input_ids"].device)
+                batch.batch["teacher_logprobs"] = torch.zeros(
+                    shape, dtype=batch.batch["old_log_probs"].dtype, device=batch.batch["old_log_probs"].device
+                )
+            else:
+                batch.batch["teacher_logprobs"] = batch.batch["old_log_probs"].detach().clone()
             batch.batch["self_distillation_mask"] = target_mask
-            batch.batch["self_distillation_loss_mask"] = batch.batch["response_mask"]
+            batch.batch["self_distillation_loss_mask"] = target_loss_mask
+            batch.batch["self_distillation_target_token_mask"] = target_token_mask
+            return batch, metrics
+        if target_token_mask.sum().item() == 0:
+            if full_logit_distillation:
+                shape = (*batch.batch["input_ids"].shape, topk)
+                batch.batch["teacher_ids"] = torch.zeros(shape, dtype=torch.long, device=batch.batch["input_ids"].device)
+                batch.batch["teacher_logprobs"] = torch.zeros(
+                    shape, dtype=batch.batch["old_log_probs"].dtype, device=batch.batch["old_log_probs"].device
+                )
+            else:
+                batch.batch["teacher_logprobs"] = batch.batch["old_log_probs"].detach().clone()
+            batch.batch["self_distillation_mask"] = target_mask
+            batch.batch["self_distillation_loss_mask"] = target_loss_mask
+            batch.batch["self_distillation_target_token_mask"] = target_token_mask
+            metrics["self_distillation/teacher_infer_skipped_empty_guarded_batch"] = 1.0
             return batch, metrics
 
-        teacher_log_prob, teacher_log_prob_mfu = self._compute_old_log_prob(teacher_batch)
-        batch.batch["teacher_logprobs"] = teacher_log_prob.batch["old_log_probs"].detach()
+        sdpo_cfg = self.config.get("tau3", {}).get("sdpo", {}) or {}
+        teacher_backend = str(sdpo_cfg.get("teacher_backend", "actor_snapshot")).lower()
+        if full_logit_distillation:
+            ppo_epochs = int(self.config.actor_rollout_ref.actor.get("ppo_epochs", 1))
+            effective_mini_batch = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size) * int(
+                self.config.actor_rollout_ref.rollout.n
+            )
+            if ppo_epochs != 1 or effective_mini_batch < batch.batch.batch_size[0]:
+                raise ValueError(
+                    "Faithful Tau3 SDPO full-logit/top-k mode precomputes actor top-k support immediately before "
+                    "the optimizer step, so it requires one PPO epoch and a single actor minibatch. "
+                    f"Got ppo_epochs={ppo_epochs}, effective_mini_batch={effective_mini_batch}, "
+                    f"batch_size={batch.batch.batch_size[0]}."
+                )
+            topk_source = str(policy_loss_cfg.get("sdpo_topk_source", "student_pre_update")).lower()
+            if topk_source not in {"student_pre_update", "student", "actor"}:
+                raise ValueError(
+                    "Faithful Tau3 SDPO full-logit mode expects actor/student top-k support; "
+                    f"got sdpo_topk_source={topk_source!r}."
+                )
+            student_topk, student_topk_mfu = self._compute_sdpo_topk_log_probs(batch, use_ref=False)
+            student_response_ids = student_topk.batch["teacher_ids"].detach()
+            if teacher_backend in {"actor", "actor_snapshot", "current_actor"}:
+                teacher_topk, teacher_log_prob_mfu = self._compute_sdpo_topk_log_probs(
+                    teacher_batch, use_ref=False, gather_response_ids=student_response_ids
+                )
+                metrics["self_distillation/teacher_backend_actor_snapshot"] = 1.0
+                metrics["self_distillation/teacher_backend_ema_ref"] = 0.0
+            elif teacher_backend in {"ema_ref", "ema"}:
+                teacher_topk, teacher_log_prob_mfu = self._compute_sdpo_topk_log_probs(
+                    teacher_batch, use_ref=True, gather_response_ids=student_response_ids
+                )
+                metrics["self_distillation/teacher_backend_actor_snapshot"] = 0.0
+                metrics["self_distillation/teacher_backend_ema_ref"] = 1.0
+            else:
+                raise ValueError(
+                    "Unsupported tau3.sdpo.teacher_backend="
+                    f"{teacher_backend!r}; expected actor_snapshot or ema_ref."
+                )
+            batch.batch["teacher_ids"] = self._response_topk_to_full_prediction_tensor(
+                batch, student_response_ids.to(batch.batch["input_ids"].device)
+            ).detach()
+            batch.batch["teacher_logprobs"] = self._response_topk_to_full_prediction_tensor(
+                batch, teacher_topk.batch["teacher_logprobs"].to(batch.batch["input_ids"].device)
+            ).detach()
+            metrics["perf/mfu/sdpo_student_topk_infer"] = student_topk_mfu
+            metrics["self_distillation/full_logit_distillation"] = 1.0
+            metrics["self_distillation/distillation_topk"] = float(policy_loss_cfg.get("sdpo_distillation_topk", 100))
+            metrics["self_distillation/topk_source_student_pre_update"] = 1.0
+        else:
+            if teacher_backend in {"actor", "actor_snapshot", "current_actor"}:
+                teacher_log_prob, teacher_log_prob_mfu = self._compute_old_log_prob(teacher_batch)
+                metrics["self_distillation/teacher_backend_actor_snapshot"] = 1.0
+                metrics["self_distillation/teacher_backend_ema_ref"] = 0.0
+            elif teacher_backend in {"ema_ref", "ema"}:
+                teacher_log_prob, teacher_log_prob_mfu = self._compute_sdpo_ema_teacher_log_prob(teacher_batch)
+                metrics["self_distillation/teacher_backend_actor_snapshot"] = 0.0
+                metrics["self_distillation/teacher_backend_ema_ref"] = 1.0
+            else:
+                raise ValueError(
+                    "Unsupported tau3.sdpo.teacher_backend="
+                    f"{teacher_backend!r}; expected actor_snapshot or ema_ref."
+                )
+            batch.batch["teacher_logprobs"] = teacher_log_prob.batch["old_log_probs"].detach()
+            metrics["self_distillation/full_logit_distillation"] = 0.0
         batch.batch["self_distillation_mask"] = target_mask
-        batch.batch["self_distillation_loss_mask"] = batch.batch["response_mask"]
+        batch.batch["self_distillation_loss_mask"] = target_loss_mask
+        batch.batch["self_distillation_target_token_mask"] = target_token_mask
         metrics["perf/mfu/sdpo_teacher_infer"] = teacher_log_prob_mfu
         return batch, metrics
 
@@ -2079,6 +2379,9 @@ class RayPPOTrainer:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
+
+                        with marked_timer("sdpo_ema_teacher", timing_raw, color="purple"):
+                            metrics.update(self._maybe_update_sdpo_ema_teacher())
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(
