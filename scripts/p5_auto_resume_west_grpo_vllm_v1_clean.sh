@@ -33,6 +33,7 @@ export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-600}"
 AUTO_RESUME_MAX_ATTEMPTS="${AUTO_RESUME_MAX_ATTEMPTS:-4}"
 AUTO_RESUME_SLEEP_SECONDS="${AUTO_RESUME_SLEEP_SECONDS:-30}"
 AUTO_RESUME_CLEANUP="${AUTO_RESUME_CLEANUP:-1}"
+AUTO_RESUME_EXCLUSIVE_NODE="${AUTO_RESUME_EXCLUSIVE_NODE:-0}"
 AUTO_RESUME_RETRY_ANY_FAILURE="${AUTO_RESUME_RETRY_ANY_FAILURE:-0}"
 AUTO_RESUME_NAME="${AUTO_RESUME_NAME:-grpo_vllm_v1_clean_300_v2_auto_resume}"
 AUTO_RESUME_LOG_ROOT="${AUTO_RESUME_LOG_ROOT:-$NVME_ROOT/logs/$AUTO_RESUME_NAME}"
@@ -88,10 +89,16 @@ cleanup_after_failure() {
     if [ "$AUTO_RESUME_CLEANUP" != "1" ]; then
         return 0
     fi
+    if [ "$AUTO_RESUME_EXCLUSIVE_NODE" != "1" ]; then
+        echo "Skipping process cleanup because AUTO_RESUME_EXCLUSIVE_NODE is not 1."
+        echo "Set AUTO_RESUME_EXCLUSIVE_NODE=1 only after confirming this P5 has no unrelated Ray/vLLM jobs."
+        return 0
+    fi
     echo "Cleaning stale Ray/vLLM/VERL runtime after failed attempt..."
     ray stop --force >/dev/null 2>&1 || true
     pkill -9 -f "verl.trainer.main_ppo|vllm|ray::|raylet" >/dev/null 2>&1 || true
     rm -rf /tmp/ray /tmp/tmpxft_* /tmp/torchinductor_* 2>/dev/null || true
+    rm -rf "$NVME_ROOT/ray_tmp/ray" "$NVME_ROOT/tmp"/tmpxft_* "$NVME_ROOT/tmp"/torchinductor_* 2>/dev/null || true
     rm -f /dev/shm/verl_dist_store_* 2>/dev/null || true
 }
 
@@ -117,6 +124,7 @@ echo "Experiment search: $OLD_PROJECT_NAME / $AUTO_RESUME_EXPERIMENT_GLOB / glob
 echo "Run stem: $RUN_STEM"
 echo "Target steps: $TOTAL_TRAINING_STEPS"
 echo "Max attempts: $AUTO_RESUME_MAX_ATTEMPTS"
+echo "Exclusive-node cleanup: $AUTO_RESUME_EXCLUSIVE_NODE"
 echo "vLLM RPC timeout: $VLLM_RPC_TIMEOUT"
 echo "Supervisor logs: $AUTO_RESUME_LOG_ROOT"
 echo "Checkpoint roots: ${checkpoint_roots[*]}"
