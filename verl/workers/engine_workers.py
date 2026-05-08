@@ -765,7 +765,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
         if self._should_checkpoint_sdpo_ema_teacher():
             teacher_path = os.path.join(local_path, "sdpo_ema_teacher")
-            self.ref.save_checkpoint(teacher_path, hdfs_path=None, global_step=global_step, max_ckpt_to_keep=None)
+            # The ref/EMA teacher is forward-only (no optimizer). Override
+            # checkpoint_contents to save model weights only.
+            ref_engine = self.ref.engine
+            original_contents = getattr(ref_engine, "checkpoint_contents", None)
+            if original_contents is not None and hasattr(original_contents, "save"):
+                from copy import copy
+                patched_contents = copy(original_contents)
+                patched_contents.save = [c for c in (patched_contents.save or []) if c != "optimizer"]
+                ref_engine.checkpoint_contents = patched_contents
+            try:
+                self.ref.save_checkpoint(teacher_path, hdfs_path=None, global_step=global_step, max_ckpt_to_keep=None)
+            finally:
+                if original_contents is not None:
+                    ref_engine.checkpoint_contents = original_contents
 
     def _should_checkpoint_sdpo_ema_teacher(self) -> bool:
         if self.ref is None or self.actor is None:
