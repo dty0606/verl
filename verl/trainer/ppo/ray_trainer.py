@@ -1373,12 +1373,25 @@ class RayPPOTrainer:
             raise RuntimeError(
                 "Tau3 SDPO EMA teacher requires a dedicated ref model; ref-in-actor/LoRA mode is unsupported."
             )
-        self.actor_rollout_wg.update_sdpo_ema_teacher(update_rate)
-        return {
+        worker_metrics = self.actor_rollout_wg.update_sdpo_ema_teacher(update_rate)
+        metrics = {
             "self_distillation/ema_teacher_enabled": 1.0,
             "self_distillation/ema_teacher_updated": 1.0,
             "self_distillation/ema_teacher_update_rate": update_rate,
         }
+        if isinstance(worker_metrics, dict):
+            worker_metrics = [worker_metrics]
+        if isinstance(worker_metrics, list):
+            for key in ("param_tensors", "param_elements", "device_transfer_tensors"):
+                values = [
+                    float(item.get(key, 0.0))
+                    for item in worker_metrics
+                    if isinstance(item, dict)
+                ]
+                if values:
+                    metrics[f"self_distillation/ema_teacher_{key}_mean"] = float(np.mean(values))
+                    metrics[f"self_distillation/ema_teacher_{key}_max"] = float(np.max(values))
+        return metrics
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
