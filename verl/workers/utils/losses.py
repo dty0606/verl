@@ -245,6 +245,11 @@ def ppo_loss(config: ActorConfig, model_output=None, data: TensorDict = None, dp
                 "actor/pg_clipfrac_lower": 0.0,
                 "self_distillation/empty_target_batch": 1.0,
                 "self_distillation/teacher_selected_fraction": 0.0,
+                "self_distillation/token_fraction": 0.0,
+                "self_distillation/full_logit_distillation": 0.0,
+                "self_distillation/alpha": 0.0,
+                "self_distillation/student_topk_mass": 0.0,
+                "self_distillation/teacher_topk_mass": 0.0,
             }
         else:
             alpha = float(config.policy_loss.get("sdpo_alpha", 1.0))
@@ -301,6 +306,9 @@ def ppo_loss(config: ActorConfig, model_output=None, data: TensorDict = None, dp
                     pg_metrics["self_distillation/teacher_topk_mass"] = (
                         sdpo_teacher_mass[selected].float().mean().detach().item()
                     )
+                else:
+                    pg_metrics["self_distillation/student_topk_mass"] = 0.0
+                    pg_metrics["self_distillation/teacher_topk_mass"] = 0.0
     else:
         policy_loss_fn = get_policy_loss_fn(loss_mode)
         pg_loss, pg_metrics = policy_loss_fn(
