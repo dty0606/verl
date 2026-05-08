@@ -6,6 +6,8 @@ torch = pytest.importorskip("torch")
 OmegaConf = omegaconf.OmegaConf
 
 from verl.trainer.ppo.utils import need_sdpo_ema_teacher
+from verl.workers.config.actor import FSDPActorConfig
+from verl.workers.config.engine import FSDPEngineConfig
 from verl.workers.engine_workers import ema_update_module_params
 
 
@@ -52,3 +54,24 @@ def test_ema_update_rejects_mismatched_modules():
 
     with pytest.raises(RuntimeError, match="shape mismatch"):
         ema_update_module_params(teacher, actor, update_rate=0.25)
+
+
+def test_forward_only_ref_config_skips_ppo_micro_batch_assertion():
+    cfg = FSDPActorConfig(
+        rollout_n=1,
+        ppo_micro_batch_size=None,
+        ppo_micro_batch_size_per_gpu=None,
+        fsdp_config=FSDPEngineConfig(forward_only=True),
+    )
+
+    assert cfg.fsdp_config.forward_only is True
+
+
+def test_training_actor_config_still_requires_ppo_micro_batch():
+    with pytest.raises(AssertionError, match="Please set at least one"):
+        FSDPActorConfig(
+            rollout_n=1,
+            ppo_micro_batch_size=None,
+            ppo_micro_batch_size_per_gpu=None,
+            fsdp_config=FSDPEngineConfig(forward_only=False),
+        )

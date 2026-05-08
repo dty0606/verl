@@ -127,6 +127,28 @@ def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tenso
     }
 
 
+def _set_sdpo_topk_mass_metrics(
+    pg_metrics: dict[str, float],
+    sdpo_loss_mask: torch.Tensor,
+    sdpo_student_mass: torch.Tensor | None = None,
+    sdpo_teacher_mass: torch.Tensor | None = None,
+) -> None:
+    """Emit stable SDPO top-k mass metric keys across all loss branches."""
+    pg_metrics["self_distillation/student_topk_mass"] = 0.0
+    pg_metrics["self_distillation/teacher_topk_mass"] = 0.0
+    if sdpo_student_mass is None or sdpo_teacher_mass is None:
+        return
+
+    selected = sdpo_loss_mask.bool()
+    if bool(selected.any().item()):
+        pg_metrics["self_distillation/student_topk_mass"] = (
+            sdpo_student_mass[selected].float().mean().detach().item()
+        )
+        pg_metrics["self_distillation/teacher_topk_mass"] = (
+            sdpo_teacher_mass[selected].float().mean().detach().item()
+        )
+
+
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     pad_mode = tu.get_non_tensor_data(data=data, key="pad_mode", default=DatasetPadMode.NO_PADDING)
     dp_size = data["dp_size"]
@@ -297,18 +319,7 @@ def ppo_loss(config: ActorConfig, model_output=None, data: TensorDict = None, dp
                 "self_distillation/full_logit_distillation": 1.0 if full_logit_distillation else 0.0,
                 "self_distillation/alpha": alpha,
             }
-            if sdpo_student_mass is not None and sdpo_teacher_mass is not None:
-                selected = sdpo_loss_mask.bool()
-                if bool(selected.any().item()):
-                    pg_metrics["self_distillation/student_topk_mass"] = (
-                        sdpo_student_mass[selected].float().mean().detach().item()
-                    )
-                    pg_metrics["self_distillation/teacher_topk_mass"] = (
-                        sdpo_teacher_mass[selected].float().mean().detach().item()
-                    )
-                else:
-                    pg_metrics["self_distillation/student_topk_mass"] = 0.0
-                    pg_metrics["self_distillation/teacher_topk_mass"] = 0.0
+            _set_sdpo_topk_mass_metrics(pg_metrics, sdpo_loss_mask, sdpo_student_mass, sdpo_teacher_mass)
     else:
         policy_loss_fn = get_policy_loss_fn(loss_mode)
         pg_loss, pg_metrics = policy_loss_fn(

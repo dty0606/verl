@@ -65,3 +65,24 @@ def test_sdpo_topk_interior_alpha_matches_upstream_generalized_jsd():
     expected = torch.lerp(kl_student, kl_teacher, alpha).sum(dim=-1)
 
     assert torch.allclose(loss, expected, atol=1e-6)
+
+
+def test_sdpo_topk_mass_metrics_exist_without_full_logit_tensors():
+    metrics = {}
+
+    sdpo_losses._set_sdpo_topk_mass_metrics(metrics, torch.ones(1, 2, dtype=torch.bool))
+
+    assert metrics["self_distillation/student_topk_mass"] == 0.0
+    assert metrics["self_distillation/teacher_topk_mass"] == 0.0
+
+
+def test_sdpo_topk_mass_metrics_average_selected_tokens():
+    metrics = {}
+    mask = torch.tensor([[True, False, True]])
+    student_mass = torch.tensor([[0.8, 0.1, 0.6]])
+    teacher_mass = torch.tensor([[0.9, 0.2, 0.7]])
+
+    sdpo_losses._set_sdpo_topk_mass_metrics(metrics, mask, student_mass, teacher_mass)
+
+    assert metrics["self_distillation/student_topk_mass"] == pytest.approx(0.7)
+    assert metrics["self_distillation/teacher_topk_mass"] == pytest.approx(0.8)
