@@ -1172,7 +1172,8 @@ def agg_loss(
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
     elif loss_agg_mode in ["seq-mean-token-sum", "seq-mean-token-sum-norm"]:
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
+        masked_loss_mat = torch.where(loss_mask.bool(), loss_mat, torch.zeros_like(loss_mat))
+        seq_losses = torch.sum(masked_loss_mat, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
             if dp_size > 1:
@@ -1186,7 +1187,8 @@ def agg_loss(
             loss /= loss_scale_factor
     elif loss_agg_mode == "seq-mean-token-mean":
         seq_mask = torch.sum(loss_mask, dim=-1)  # per-sequence token count
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
+        masked_loss_mat = torch.where(loss_mask.bool(), loss_mat, torch.zeros_like(loss_mat))
+        seq_losses = torch.sum(masked_loss_mat, dim=-1) / (seq_mask + 1e-8)  # token-mean
         seq_mask = (seq_mask > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
             if dp_size > 1:

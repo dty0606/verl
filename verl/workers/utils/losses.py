@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+import os
+
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -28,15 +30,60 @@ from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sdpo_fail_fast_nonfinite_enabled() -> bool:
+    return _env_flag("SDPO_FAIL_FAST_NONFINITE")
+
+
+def _raise_if_nonfinite_tensor(name: str, tensor: torch.Tensor) -> None:
+    if bool(torch.isfinite(tensor).all().item()):
+        return
+    finite_mask = torch.isfinite(tensor)
+    bad_count = int((~finite_mask).sum().item())
+    first_bad = (~finite_mask).nonzero(as_tuple=False)[0].detach().cpu().tolist()
+    finite_values = tensor[finite_mask]
+    finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
+    finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")
+    raise RuntimeError(
+        f"Non-finite SDPO tensor {name} "
+        f"shape={tuple(tensor.shape)} dtype={tensor.dtype} bad_count={bad_count} "
+        f"first_bad={first_bad} finite_min={finite_min} finite_max={finite_max}"
+    )
+
+
+def _validate_topk_log_probs(name: str, log_probs: torch.Tensor, *, tolerance: float = 1e-4) -> None:
+    """Fail fast when finite tensors are not valid top-k log-probability slices."""
+    _raise_if_nonfinite_tensor(name, log_probs)
+    log_mass = torch.logsumexp(log_probs.float(), dim=-1)
+    bad_mass = ~torch.isfinite(log_mass) | (log_mass > tolerance)
+    if bool(bad_mass.any().item()):
+        first_bad = bad_mass.nonzero(as_tuple=False)[0].detach().cpu().tolist()
+        finite_mass = log_mass[torch.isfinite(log_mass)]
+        max_log_mass = float(finite_mass.max().item()) if finite_mass.numel() else float("nan")
+        raise RuntimeError(
+            f"Invalid SDPO top-k log-prob mass for {name} "
+            f"shape={tuple(log_probs.shape)} first_bad={first_bad} "
+            f"max_log_mass={max_log_mass} tolerance={tolerance}"
+        )
+
+
 def _add_tail_log_prob(log_probs: torch.Tensor) -> torch.Tensor:
     """Append a residual probability bucket for top-k distillation."""
+    log_probs = log_probs.float()
     log_s = torch.logsumexp(log_probs, dim=-1, keepdim=True)
-    log_s = torch.clamp(log_s, max=-1e-7)
+    log_s = torch.clamp(log_s, max=-1e-6)
     tail_log = torch.log(-torch.expm1(log_s))
     return torch.cat([log_probs, tail_log], dim=-1)
 
 
 def _renormalize_topk_log_probs(log_probs: torch.Tensor) -> torch.Tensor:
+    log_probs = log_probs.float()
     return log_probs - torch.logsumexp(log_probs, dim=-1, keepdim=True)
 
 
@@ -55,6 +102,9 @@ def _sdpo_jensen_shannon_topk_loss(
     endpoints and the unnormalized interior JSD expression.
     """
     teacher_topk_log_probs = teacher_topk_log_probs.detach()
+    if _sdpo_fail_fast_nonfinite_enabled():
+        _validate_topk_log_probs("student_topk_log_probs", student_topk_log_probs)
+        _validate_topk_log_probs("teacher_topk_log_probs", teacher_topk_log_probs)
     if add_tail:
         student_distill_log_probs = _add_tail_log_prob(student_topk_log_probs)
         teacher_distill_log_probs = _add_tail_log_prob(teacher_topk_log_probs)
@@ -81,6 +131,10 @@ def _sdpo_jensen_shannon_topk_loss(
         kl_student = F.kl_div(mixture_log_probs, student_distill_log_probs, reduction="none", log_target=True)
         kl_loss = torch.lerp(kl_student, kl_teacher, alpha_tensor)
 
+    if _sdpo_fail_fast_nonfinite_enabled():
+        _raise_if_nonfinite_tensor("student_distill_log_probs", student_distill_log_probs)
+        _raise_if_nonfinite_tensor("teacher_distill_log_probs", teacher_distill_log_probs)
+        _raise_if_nonfinite_tensor("sdpo_topk_kl_terms", kl_loss)
     return kl_loss.sum(dim=-1)
 
 
@@ -106,21 +160,27 @@ def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tenso
             "SDPO top-k teacher tensors must align with actor logits; "
             f"got teacher={tuple(teacher_topk_log_probs.shape)} actor={tuple(student_logits.shape)}"
         )
-    if not bool(torch.isfinite(teacher_topk_log_probs).all().item()):
-        finite_mask = torch.isfinite(teacher_topk_log_probs)
-        bad_count = int((~finite_mask).sum().item())
-        first_bad = (~finite_mask).nonzero(as_tuple=False)[0].detach().cpu().tolist()
-        finite_values = teacher_topk_log_probs[finite_mask]
-        finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
-        finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")
-        raise RuntimeError(
-            "Non-finite SDPO teacher top-k logprobs reached actor loss "
-            f"shape={tuple(teacher_topk_log_probs.shape)} bad_count={bad_count} "
-            f"first_bad={first_bad} finite_min={finite_min} finite_max={finite_max}"
-        )
+    _raise_if_nonfinite_tensor("teacher_topk_log_probs reached actor loss", teacher_topk_log_probs)
 
+    if _sdpo_fail_fast_nonfinite_enabled():
+        _raise_if_nonfinite_tensor("actor_student_logits", student_logits)
     student_log_probs = F.log_softmax(student_logits, dim=-1)
+    if _sdpo_fail_fast_nonfinite_enabled():
+        _raise_if_nonfinite_tensor("actor_student_log_probs", student_log_probs)
+        vocab_size = student_logits.shape[-1]
+        bad_ids = (teacher_topk_ids < 0) | (teacher_topk_ids >= vocab_size)
+        if bool(bad_ids.any().item()):
+            first_bad = bad_ids.nonzero(as_tuple=False)[0]
+            bad_index = first_bad.detach().cpu().tolist()
+            bad_value = int(teacher_topk_ids[tuple(first_bad.tolist())].item())
+            raise RuntimeError(
+                "Invalid SDPO teacher top-k id reached actor loss "
+                f"shape={tuple(teacher_topk_ids.shape)} vocab_size={vocab_size} "
+                f"first_bad={bad_index} value={bad_value}"
+            )
     student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
+    if _sdpo_fail_fast_nonfinite_enabled():
+        _raise_if_nonfinite_tensor("actor_student_topk_log_probs", student_topk_log_probs)
 
     alpha = float(config.policy_loss.get("sdpo_alpha", 0.5))
     if not 0.0 <= alpha <= 1.0:
@@ -132,6 +192,8 @@ def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tenso
         alpha=alpha,
         add_tail=add_tail,
     )
+    if _sdpo_fail_fast_nonfinite_enabled():
+        _raise_if_nonfinite_tensor("sdpo_topk_per_token_loss", per_token_loss)
     return {
         "sdpo_distillation_losses": per_token_loss,
         "sdpo_student_mass": student_topk_log_probs.exp().sum(dim=-1),
@@ -308,6 +370,12 @@ def ppo_loss(config: ActorConfig, model_output=None, data: TensorDict = None, dp
                 per_token_loss = per_token_loss * torch.exp(negative_approx_kl).clamp(max=float(is_clip))
             if rollout_is_weights is not None:
                 per_token_loss = per_token_loss * rollout_is_weights
+            if full_logit_distillation:
+                selected = sdpo_loss_mask.bool()
+                if _sdpo_fail_fast_nonfinite_enabled() and bool(selected.any().item()):
+                    _raise_if_nonfinite_tensor("selected_sdpo_per_token_loss", per_token_loss[selected])
+                # Avoid masked-out diagnostic NaNs poisoning sequence-level aggregations via 0 * NaN.
+                per_token_loss = torch.where(selected, per_token_loss, torch.zeros_like(per_token_loss))
             pg_loss = agg_loss(
                 loss_mat=per_token_loss,
                 loss_mask=sdpo_loss_mask,

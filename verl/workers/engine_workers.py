@@ -224,7 +224,19 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
                     dtype=teacher_param.dtype,
                     non_blocking=True,
                 )
+                if check_finite and not bool(torch.isfinite(actor_data).all().item()):
+                    bad_count = int((~torch.isfinite(actor_data)).sum().item())
+                    raise RuntimeError(
+                        "Non-finite actor parameter after SDPO EMA device/dtype transfer "
+                        f"name={actor_name} shape={tuple(actor_data.shape)} bad_count={bad_count}"
+                    )
             teacher_param.data.mul_(1.0 - update_rate).add_(actor_data, alpha=update_rate)
+            if check_finite and not bool(torch.isfinite(teacher_param.data).all().item()):
+                bad_count = int((~torch.isfinite(teacher_param.data)).sum().item())
+                raise RuntimeError(
+                    "Non-finite teacher parameter after SDPO EMA update "
+                    f"name={teacher_name} shape={tuple(teacher_param.shape)} bad_count={bad_count}"
+                )
             param_tensors += 1
             param_elements += teacher_param.numel()
 

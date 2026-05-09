@@ -113,7 +113,57 @@ def test_sdpo_topk_logits_processor_fails_fast_on_nan_teacher_logprobs():
     config = SimpleNamespace(policy_loss={"sdpo_alpha": 0.5, "sdpo_distillation_add_tail": True})
     student_logits = torch.randn(1, 2, 4)
 
-    with pytest.raises(RuntimeError, match="Non-finite SDPO teacher top-k logprobs"):
+    with pytest.raises(RuntimeError, match="teacher_topk_log_probs reached actor loss"):
+        sdpo_losses._sdpo_topk_logits_processor(config, student_logits=student_logits, data=data)
+
+
+def test_sdpo_topk_loss_fails_fast_on_invalid_logprob_mass(monkeypatch):
+    monkeypatch.setenv("SDPO_FAIL_FAST_NONFINITE", "1")
+    # Finite, but not log-probabilities: exp(0) + exp(0) > 1.
+    student = torch.tensor([[[0.0, 0.0]]])
+    teacher = torch.log_softmax(torch.tensor([[[1.0, 0.0]]]), dim=-1)
+
+    with pytest.raises(RuntimeError, match="Invalid SDPO top-k log-prob mass"):
+        sdpo_losses._sdpo_jensen_shannon_topk_loss(
+            student_topk_log_probs=student,
+            teacher_topk_log_probs=teacher,
+            alpha=0.5,
+            add_tail=True,
+        )
+
+
+def test_sdpo_topk_loss_tail_is_finite_for_near_unit_fp16_mass(monkeypatch):
+    monkeypatch.setenv("SDPO_FAIL_FAST_NONFINITE", "1")
+    logits = torch.tensor([[[12.0, -10.0, -11.0]]], dtype=torch.float16)
+    log_probs = torch.log_softmax(logits.float(), dim=-1).to(torch.float16)
+
+    loss = sdpo_losses._sdpo_jensen_shannon_topk_loss(
+        student_topk_log_probs=log_probs,
+        teacher_topk_log_probs=log_probs,
+        alpha=0.5,
+        add_tail=True,
+    )
+
+    assert torch.isfinite(loss).all()
+
+
+def test_sdpo_topk_logits_processor_fails_fast_on_student_nan(monkeypatch):
+    monkeypatch.setenv("SDPO_FAIL_FAST_NONFINITE", "1")
+    values = torch.tensor([[-0.1, -0.2], [-0.2, -0.3]])
+    ids = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    offsets = torch.tensor([0, 2], dtype=torch.long)
+    data = TensorDict(
+        {
+            "teacher_logprobs": torch.nested.nested_tensor_from_jagged(values, offsets=offsets),
+            "teacher_ids": torch.nested.nested_tensor_from_jagged(ids, offsets=offsets),
+        },
+        batch_size=[],
+    )
+    config = SimpleNamespace(policy_loss={"sdpo_alpha": 0.5, "sdpo_distillation_add_tail": True})
+    student_logits = torch.randn(1, 2, 4)
+    student_logits[0, 0, 0] = float("nan")
+
+    with pytest.raises(RuntimeError, match="actor_student_logits"):
         sdpo_losses._sdpo_topk_logits_processor(config, student_logits=student_logits, data=data)
 
 

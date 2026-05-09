@@ -82,6 +82,36 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sdpo_fail_fast_nonfinite_enabled() -> bool:
+    return _env_flag("SDPO_FAIL_FAST_NONFINITE")
+
+
+def _raise_first_nonfinite_named_tensor(named_tensors, *, phase: str) -> None:
+    for name, tensor in named_tensors:
+        if tensor is None or not tensor.is_floating_point():
+            continue
+        if bool(torch.isfinite(tensor).all().item()):
+            continue
+        finite_mask = torch.isfinite(tensor)
+        bad_count = int((~finite_mask).sum().item())
+        first_bad = (~finite_mask).nonzero(as_tuple=False)[0].detach().cpu().tolist()
+        finite_values = tensor[finite_mask]
+        finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
+        finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")
+        raise RuntimeError(
+            f"Non-finite SDPO {phase} tensor name={name} "
+            f"shape={tuple(tensor.shape)} dtype={tensor.dtype} bad_count={bad_count} "
+            f"first_bad={first_bad} finite_min={finite_min} finite_max={finite_max}"
+        )
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -670,6 +700,12 @@ class FSDPEngine(BaseEngine):
         if scaler is not None:
             scaler.unscale_(self.optimizer)
 
+        if _sdpo_fail_fast_nonfinite_enabled():
+            _raise_first_nonfinite_named_tensor(
+                ((name, param.grad) for name, param in self.module.named_parameters()),
+                phase="actor gradient before optimizer step",
+            )
+
         if isinstance(self.module, FSDP):
             grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
         elif isinstance(self.module, FSDPModule):
@@ -681,6 +717,9 @@ class FSDPEngine(BaseEngine):
 
         if isinstance(grad_norm, DTensor):
             grad_norm = grad_norm.full_tensor()
+        grad_norm_tensor = grad_norm if isinstance(grad_norm, torch.Tensor) else torch.tensor(grad_norm)
+        if _sdpo_fail_fast_nonfinite_enabled() and not bool(torch.isfinite(grad_norm_tensor).all().item()):
+            raise RuntimeError(f"Non-finite SDPO actor grad_norm before optimizer step: {grad_norm}")
 
         if scaler is not None:
             # scaler handles inf/nan skipping internally via _check_inf_per_device.
@@ -693,6 +732,12 @@ class FSDPEngine(BaseEngine):
                 self.optimizer.zero_grad()
             else:
                 self.optimizer.step()
+
+        if _sdpo_fail_fast_nonfinite_enabled():
+            _raise_first_nonfinite_named_tensor(
+                self.module.named_parameters(),
+                phase="actor parameter after optimizer step",
+            )
 
         if self._qat_enabled:
             from verl.utils.qat.core import invalidate_all_scales
@@ -1080,7 +1125,21 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                if _sdpo_fail_fast_nonfinite_enabled():
+                    _raise_first_nonfinite_named_tensor(
+                        [("raw_logits_rmpad", logits_rmpad)],
+                        phase="FSDP forward before temperature scaling",
+                    )
+                    _raise_first_nonfinite_named_tensor(
+                        [("temperature_rmpad", temperature_rmpad)],
+                        phase="FSDP forward temperature",
+                    )
                 logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
+                if _sdpo_fail_fast_nonfinite_enabled():
+                    _raise_first_nonfinite_named_tensor(
+                        [("scaled_logits_rmpad", logits_rmpad)],
+                        phase="FSDP forward after temperature scaling",
+                    )
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                 inplace_backward = True
