@@ -1,6 +1,14 @@
 # Project: latest-VERL tau3 GRPO/SDPO fork
 
-Last Updated: 2026-05-07
+Last Updated: 2026-05-09
+
+### 2026-05-09 Tau3 SDPO OOM diagnosis and safe audit recipe
+
+- A 3-step original SDPO smoke on P5 passed after the EMA teacher device/checkpoint fixes: actor checkpoint, optimizer shards, and `sdpo_ema_teacher` shards were saved.
+- A 100-step original SDPO audit later OOMed at step 7 during `actor_rollout_ref_compute_log_prob`, with PyTorch trying to allocate ~26.67 GiB while ~26.60 GiB was free on GPU 0. The last healthy steps had ordinary response lengths (~2K mean, ~3.1K max), so the risk is from full-vocab logit materialization in SDPO logprob/top-k paths, not simply visible response length.
+- Local Codex added opt-in diagnostics and launcher knobs, pending/now intended for Git sync: `SDPO_LOGPROB_DIAGNOSTICS`, `SDPO_CUDA_MEMORY_DIAGNOSTICS`, logprob dynamic-batch env passthrough, and pre-logprob batch length summaries. These are for debugging only and should not change training semantics when disabled.
+- Conservative next P5 run while debugging: keep `SDPO_ARM=original`, `SDPO_MEMORY_ENABLED=false`, `SDPO_TEACHER_BACKEND=ema_ref`, but cap `MAX_RESPONSE_LENGTH=8192`, `SDPO_MAX_REPROMPT_LEN=4096`, `MAX_MODEL_LEN=16384`, set `ROLLOUT_GPU_MEMORY_UTILIZATION=0.50`, and enable the two diagnostics env vars for the first safe audit.
+- Interpretation note: current successful-peer selection is deterministic but not semantic ranking. It collects eligible successes by current row order and uses `solution_idxs[0]`; sequence-length balancing may affect that order, so future ablations should compare `first_success` against `random_success` and `shortest/cleanest_success` for multi-turn agents.
 
 ### 2026-05-07 Multi-turn SDPO/GRPO masking failure-mode note
 

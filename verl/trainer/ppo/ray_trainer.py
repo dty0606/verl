@@ -437,6 +437,59 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    @staticmethod
+    def _sdpo_length_stats(batch: DataProto, key: str) -> dict[str, float]:
+        if key not in batch.batch.keys():
+            return {}
+        tensor = batch.batch[key]
+        if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            return {}
+        if tensor.dim() == 1:
+            lengths = tensor.to(torch.float32)
+        elif "mask" in key or key in {"attention_mask", "loss_mask"}:
+            lengths = tensor.to(torch.float32).sum(dim=-1)
+        else:
+            return {}
+        lengths = lengths.detach().cpu()
+        return {
+            f"{key}_min": float(lengths.min().item()),
+            f"{key}_mean": float(lengths.mean().item()),
+            f"{key}_max": float(lengths.max().item()),
+        }
+
+    def _log_sdpo_topk_batch_diagnostics(
+        self,
+        batch: DataProto,
+        *,
+        use_ref: bool,
+        gather_response_ids: Optional[torch.Tensor],
+        topk: int,
+    ) -> None:
+        enabled = str(os.environ.get("SDPO_LOGPROB_DIAGNOSTICS", "0")).lower() in {"1", "true", "yes", "on"}
+        if not enabled:
+            return
+
+        stats: dict[str, float | int | str | tuple[int, ...]] = {
+            "step": int(self.global_steps),
+            "phase": "ema_ref_teacher" if use_ref else "actor_student",
+            "gather_teacher_ids": int(gather_response_ids is not None),
+            "topk": int(topk),
+            "batch_size": int(batch.batch.batch_size[0]),
+        }
+        for key in (
+            "attention_mask",
+            "response_mask",
+            "loss_mask",
+            "self_distillation_mask",
+            "self_distillation_loss_mask",
+            "self_distillation_target_token_mask",
+        ):
+            stats.update(self._sdpo_length_stats(batch, key))
+        if gather_response_ids is not None:
+            stats["gather_response_ids_shape"] = tuple(int(x) for x in gather_response_ids.shape)
+
+        print(f"[sdpo_topk_pre_logprob] {json.dumps(stats, sort_keys=True, default=str)}", flush=True)
+
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
     ):
@@ -1198,7 +1251,7 @@ class RayPPOTrainer:
 
         return ref_log_prob
 
-    def _compute_old_log_prob(self, batch: DataProto):
+    def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, float, dict[str, object]]:
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
@@ -1219,7 +1272,8 @@ class RayPPOTrainer:
         routed_experts = tu.get(output, "routed_experts")
         sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
 
-        old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+        metrics = tu.get(output, "metrics") or {}
+        old_log_prob_mfu = metrics["mfu"]
         # step 4. No padding to padding
         entropy = no_padding_2_padding(entropy, batch_td)
         log_probs = no_padding_2_padding(log_probs, batch_td)
@@ -1233,9 +1287,9 @@ class RayPPOTrainer:
             result["sum_pi_squared"] = sum_pi_squared.float()
         old_log_prob = tu.get_tensordict(result)
         old_log_prob = DataProto.from_tensordict(old_log_prob)
-        return old_log_prob, old_log_prob_mfu
+        return old_log_prob, old_log_prob_mfu, dict(metrics)
 
-    def _compute_sdpo_ema_teacher_log_prob(self, batch: DataProto):
+    def _compute_sdpo_ema_teacher_log_prob(self, batch: DataProto) -> tuple[DataProto, float, dict[str, object]]:
         if self.ref_in_actor:
             raise RuntimeError(
                 "Tau3 SDPO teacher_backend=ema_ref requires a dedicated ref model; "
@@ -1255,7 +1309,7 @@ class RayPPOTrainer:
         metrics = tu.get(output, "metrics") or {}
         log_probs = no_padding_2_padding(log_probs, batch_td)
         teacher_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()}))
-        return teacher_log_prob, float(metrics.get("mfu", 0.0) or 0.0)
+        return teacher_log_prob, float(metrics.get("mfu", 0.0) or 0.0), dict(metrics)
 
     @staticmethod
     def _response_topk_to_full_prediction_tensor(batch: DataProto, response_topk: torch.Tensor) -> torch.Tensor:
@@ -1305,7 +1359,7 @@ class RayPPOTrainer:
         *,
         use_ref: bool,
         gather_response_ids: Optional[torch.Tensor] = None,
-    ) -> tuple[DataProto, float]:
+    ) -> tuple[DataProto, float, dict[str, object]]:
         """Compute response-position top-k IDs/logprobs for SDPO distillation.
 
         If ``gather_response_ids`` is absent, this returns the model's own top-k
@@ -1329,6 +1383,13 @@ class RayPPOTrainer:
             topk_batch.batch["teacher_ids"] = self._response_topk_to_full_prediction_tensor(
                 topk_batch, gather_response_ids.to(topk_batch.batch["input_ids"].device)
             )
+
+        self._log_sdpo_topk_batch_diagnostics(
+            topk_batch,
+            use_ref=use_ref,
+            gather_response_ids=gather_response_ids,
+            topk=topk,
+        )
 
         batch_td = topk_batch.to_tensordict()
         batch_td = left_right_2_no_padding(batch_td)
@@ -1356,7 +1417,32 @@ class RayPPOTrainer:
                 tu.get_tensordict({"teacher_logprobs": topk_log_probs, "teacher_ids": topk_ids})
             ),
             float(metrics.get("mfu", 0.0) or 0.0),
+            dict(metrics),
         )
+
+    @staticmethod
+    def _prefix_sdpo_logprob_worker_metrics(worker_metrics: dict[str, object], phase: str) -> dict[str, float]:
+        prefixed: dict[str, float] = {}
+        for key, value in (worker_metrics or {}).items():
+            if not str(key).startswith("cuda_memory/"):
+                continue
+            metric_key = f"sdpo_logprob/{phase}/{key}"
+            if isinstance(value, (list, tuple)):
+                numeric_values: list[float] = []
+                for item in value:
+                    try:
+                        numeric_values.append(float(item))
+                    except (TypeError, ValueError):
+                        continue
+                if numeric_values:
+                    prefixed[f"{metric_key}/mean"] = sum(numeric_values) / len(numeric_values)
+                    prefixed[f"{metric_key}/max"] = max(numeric_values)
+                continue
+            try:
+                prefixed[metric_key] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return prefixed
 
     def _maybe_update_sdpo_ema_teacher(self) -> dict[str, float]:
         if not self.use_sdpo_ema_teacher:
@@ -2015,18 +2101,25 @@ class RayPPOTrainer:
                     "Faithful Tau3 SDPO full-logit mode expects actor/student top-k support; "
                     f"got sdpo_topk_source={topk_source!r}."
                 )
-            student_topk, student_topk_mfu = self._compute_sdpo_topk_log_probs(batch, use_ref=False)
+            student_topk, student_topk_mfu, student_worker_metrics = self._compute_sdpo_topk_log_probs(
+                batch, use_ref=False
+            )
+            metrics.update(self._prefix_sdpo_logprob_worker_metrics(student_worker_metrics, "actor_student"))
             student_response_ids = student_topk.batch["teacher_ids"].detach()
             if teacher_backend in {"actor", "actor_snapshot", "current_actor"}:
-                teacher_topk, teacher_log_prob_mfu = self._compute_sdpo_topk_log_probs(
+                teacher_topk, teacher_log_prob_mfu, teacher_worker_metrics = self._compute_sdpo_topk_log_probs(
                     teacher_batch, use_ref=False, gather_response_ids=student_response_ids
+                )
+                metrics.update(
+                    self._prefix_sdpo_logprob_worker_metrics(teacher_worker_metrics, "actor_snapshot_teacher")
                 )
                 metrics["self_distillation/teacher_backend_actor_snapshot"] = 1.0
                 metrics["self_distillation/teacher_backend_ema_ref"] = 0.0
             elif teacher_backend in {"ema_ref", "ema"}:
-                teacher_topk, teacher_log_prob_mfu = self._compute_sdpo_topk_log_probs(
+                teacher_topk, teacher_log_prob_mfu, teacher_worker_metrics = self._compute_sdpo_topk_log_probs(
                     teacher_batch, use_ref=True, gather_response_ids=student_response_ids
                 )
+                metrics.update(self._prefix_sdpo_logprob_worker_metrics(teacher_worker_metrics, "ema_ref_teacher"))
                 metrics["self_distillation/teacher_backend_actor_snapshot"] = 0.0
                 metrics["self_distillation/teacher_backend_ema_ref"] = 1.0
             else:
@@ -2046,11 +2139,19 @@ class RayPPOTrainer:
             metrics["self_distillation/topk_source_student_pre_update"] = 1.0
         else:
             if teacher_backend in {"actor", "actor_snapshot", "current_actor"}:
-                teacher_log_prob, teacher_log_prob_mfu = self._compute_old_log_prob(teacher_batch)
+                teacher_log_prob, teacher_log_prob_mfu, teacher_worker_metrics = self._compute_old_log_prob(
+                    teacher_batch
+                )
+                metrics.update(
+                    self._prefix_sdpo_logprob_worker_metrics(teacher_worker_metrics, "actor_snapshot_teacher")
+                )
                 metrics["self_distillation/teacher_backend_actor_snapshot"] = 1.0
                 metrics["self_distillation/teacher_backend_ema_ref"] = 0.0
             elif teacher_backend in {"ema_ref", "ema"}:
-                teacher_log_prob, teacher_log_prob_mfu = self._compute_sdpo_ema_teacher_log_prob(teacher_batch)
+                teacher_log_prob, teacher_log_prob_mfu, teacher_worker_metrics = (
+                    self._compute_sdpo_ema_teacher_log_prob(teacher_batch)
+                )
+                metrics.update(self._prefix_sdpo_logprob_worker_metrics(teacher_worker_metrics, "ema_ref_teacher"))
                 metrics["self_distillation/teacher_backend_actor_snapshot"] = 0.0
                 metrics["self_distillation/teacher_backend_ema_ref"] = 1.0
             else:
@@ -2269,7 +2370,9 @@ class RayPPOTrainer:
                         )
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
+                            old_log_prob, old_log_prob_mfu, old_log_prob_worker_metrics = self._compute_old_log_prob(
+                                batch
+                            )
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
                             actor_config = self.config.actor_rollout_ref.actor
@@ -2283,6 +2386,11 @@ class RayPPOTrainer:
                                 "actor/entropy": entropy_agg.detach().item(),
                                 "perf/mfu/actor_infer": old_log_prob_mfu,
                             }
+                            old_log_prob_metrics.update(
+                                self._prefix_sdpo_logprob_worker_metrics(
+                                    old_log_prob_worker_metrics, "old_actor_logprob"
+                                )
+                            )
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
                             if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:

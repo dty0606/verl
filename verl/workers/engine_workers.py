@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import functools
+import json
 import logging
 import os
 from contextlib import nullcontext
@@ -55,6 +56,113 @@ from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sdpo_cuda_memory_diagnostics_enabled() -> bool:
+    return _env_flag("SDPO_CUDA_MEMORY_DIAGNOSTICS") or _env_flag("SDPO_LOGPROB_DIAGNOSTICS")
+
+
+def _gib(num_bytes: int | float) -> float:
+    return float(num_bytes) / (1024**3)
+
+
+def _cuda_memory_snapshot() -> dict[str, float]:
+    if not torch.cuda.is_available():
+        return {}
+
+    device = torch.cuda.current_device()
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    except TypeError:
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+
+    snapshot: dict[str, float] = {
+        "device": float(device),
+        "allocated_gib": _gib(torch.cuda.memory_allocated(device)),
+        "reserved_gib": _gib(torch.cuda.memory_reserved(device)),
+        "max_allocated_gib": _gib(torch.cuda.max_memory_allocated(device)),
+        "max_reserved_gib": _gib(torch.cuda.max_memory_reserved(device)),
+        "free_gib": _gib(free_bytes),
+        "total_gib": _gib(total_bytes),
+    }
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        snapshot["rank"] = float(torch.distributed.get_rank())
+    local_rank = os.getenv("LOCAL_RANK")
+    if local_rank is not None:
+        try:
+            snapshot["local_rank"] = float(local_rank)
+        except ValueError:
+            pass
+    return snapshot
+
+
+def _print_sdpo_cuda_memory_event(phase: str, event: str, snapshot: dict[str, float], error: Exception | None = None):
+    if not _sdpo_cuda_memory_diagnostics_enabled():
+        return
+    payload: dict[str, object] = {"phase": phase, "event": event, **snapshot}
+    if error is not None:
+        payload["error_type"] = type(error).__name__
+        payload["error"] = str(error)[:500]
+    print(f"[sdpo_cuda_memory] {json.dumps(payload, sort_keys=True)}", flush=True)
+
+
+def _begin_sdpo_cuda_memory_diagnostics(phase: str) -> dict[str, float] | None:
+    if not _sdpo_cuda_memory_diagnostics_enabled():
+        return None
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.reset_peak_memory_stats(torch.cuda.current_device())
+        except Exception:
+            pass
+    try:
+        snapshot = _cuda_memory_snapshot()
+    except Exception:
+        snapshot = {}
+    _print_sdpo_cuda_memory_event(phase, "before", snapshot)
+    return snapshot
+
+
+def _finish_sdpo_cuda_memory_diagnostics(
+    phase: str,
+    before: dict[str, float] | None,
+    *,
+    event: str = "after",
+    error: Exception | None = None,
+) -> dict[str, float]:
+    if before is None:
+        return {}
+    try:
+        after = _cuda_memory_snapshot()
+    except Exception:
+        after = {}
+    _print_sdpo_cuda_memory_event(phase, event, after, error=error)
+
+    metrics: dict[str, float] = {}
+    for key, value in before.items():
+        metrics[f"cuda_memory/before_{key}"] = float(value)
+    for key, value in after.items():
+        metrics[f"cuda_memory/after_{key}"] = float(value)
+    if "max_allocated_gib" in after:
+        metrics["cuda_memory/peak_allocated_gib"] = float(after["max_allocated_gib"])
+    if "max_reserved_gib" in after:
+        metrics["cuda_memory/peak_reserved_gib"] = float(after["max_reserved_gib"])
+    return metrics
+
+
+def _attach_sdpo_cuda_memory_metrics(output: TensorDict | None, metrics: dict[str, float]) -> TensorDict | None:
+    if output is None or not metrics:
+        return output
+    output_metrics = tu.get(output, "metrics") or {}
+    output_metrics.update(metrics)
+    tu.assign_non_tensor(output, metrics=output_metrics)
+    return output
 
 
 def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torch.nn.Module, update_rate: float) -> dict:
@@ -729,14 +837,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        output = self.ref.infer_batch(data=data)
+        memory_before = _begin_sdpo_cuda_memory_diagnostics("ref_compute_log_prob")
+        try:
+            output = self.ref.infer_batch(data=data)
+        except Exception as exc:
+            _finish_sdpo_cuda_memory_diagnostics(
+                "ref_compute_log_prob",
+                memory_before,
+                event="exception",
+                error=exc,
+            )
+            raise
+        memory_metrics = _finish_sdpo_cuda_memory_diagnostics("ref_compute_log_prob", memory_before)
+        output = _attach_sdpo_cuda_memory_metrics(output, memory_metrics)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        output = self.actor.infer_batch(data)
+        memory_before = _begin_sdpo_cuda_memory_diagnostics("actor_compute_log_prob")
+        try:
+            output = self.actor.infer_batch(data)
+        except Exception as exc:
+            _finish_sdpo_cuda_memory_diagnostics(
+                "actor_compute_log_prob",
+                memory_before,
+                event="exception",
+                error=exc,
+            )
+            raise
+        memory_metrics = _finish_sdpo_cuda_memory_diagnostics("actor_compute_log_prob", memory_before)
+        output = _attach_sdpo_cuda_memory_metrics(output, memory_metrics)
 
         return output.cpu() if output is not None else None
 
