@@ -106,6 +106,18 @@ def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tenso
             "SDPO top-k teacher tensors must align with actor logits; "
             f"got teacher={tuple(teacher_topk_log_probs.shape)} actor={tuple(student_logits.shape)}"
         )
+    if not bool(torch.isfinite(teacher_topk_log_probs).all().item()):
+        finite_mask = torch.isfinite(teacher_topk_log_probs)
+        bad_count = int((~finite_mask).sum().item())
+        first_bad = (~finite_mask).nonzero(as_tuple=False)[0].detach().cpu().tolist()
+        finite_values = teacher_topk_log_probs[finite_mask]
+        finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
+        finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")
+        raise RuntimeError(
+            "Non-finite SDPO teacher top-k logprobs reached actor loss "
+            f"shape={tuple(teacher_topk_log_probs.shape)} bad_count={bad_count} "
+            f"first_bad={first_bad} finite_min={finite_min} finite_max={finite_max}"
+        )
 
     student_log_probs = F.log_softmax(student_logits, dim=-1)
     student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)

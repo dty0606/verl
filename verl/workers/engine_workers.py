@@ -69,6 +69,10 @@ def _sdpo_cuda_memory_diagnostics_enabled() -> bool:
     return _env_flag("SDPO_CUDA_MEMORY_DIAGNOSTICS") or _env_flag("SDPO_LOGPROB_DIAGNOSTICS")
 
 
+def _sdpo_ema_finite_check_enabled() -> bool:
+    return _env_flag("SDPO_EMA_FINITE_CHECK") or _env_flag("SDPO_FAIL_FAST_NONFINITE")
+
+
 def _gib(num_bytes: int | float) -> float:
     return float(num_bytes) / (1024**3)
 
@@ -168,6 +172,7 @@ def _attach_sdpo_cuda_memory_metrics(output: TensorDict | None, metrics: dict[st
 def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torch.nn.Module, update_rate: float) -> dict:
     """In-place EMA update for two same-shaped modules."""
     update_rate = float(update_rate)
+    check_finite = _sdpo_ema_finite_check_enabled()
     if update_rate <= 0.0:
         return {
             "updated": False,
@@ -199,6 +204,19 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
             if not teacher_param.is_floating_point():
                 continue
             actor_data = actor_param.data.detach()
+            if check_finite:
+                if not bool(torch.isfinite(actor_data).all().item()):
+                    bad_count = int((~torch.isfinite(actor_data)).sum().item())
+                    raise RuntimeError(
+                        "Non-finite actor parameter before SDPO EMA update "
+                        f"name={actor_name} shape={tuple(actor_data.shape)} bad_count={bad_count}"
+                    )
+                if not bool(torch.isfinite(teacher_param.data).all().item()):
+                    bad_count = int((~torch.isfinite(teacher_param.data)).sum().item())
+                    raise RuntimeError(
+                        "Non-finite teacher parameter before SDPO EMA update "
+                        f"name={teacher_name} shape={tuple(teacher_param.shape)} bad_count={bad_count}"
+                    )
             if actor_data.device != teacher_param.device or actor_data.dtype != teacher_param.dtype:
                 device_transfer_tensors += 1
                 actor_data = actor_data.to(

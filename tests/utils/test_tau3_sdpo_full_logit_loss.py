@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,6 +97,24 @@ def test_sdpo_topk_mass_metrics_average_selected_tokens():
 
     assert metrics["self_distillation/student_topk_mass"] == pytest.approx(0.7)
     assert metrics["self_distillation/teacher_topk_mass"] == pytest.approx(0.8)
+
+
+def test_sdpo_topk_logits_processor_fails_fast_on_nan_teacher_logprobs():
+    values = torch.tensor([[-0.1, float("nan")], [-0.2, -0.3]])
+    ids = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    offsets = torch.tensor([0, 2], dtype=torch.long)
+    data = TensorDict(
+        {
+            "teacher_logprobs": torch.nested.nested_tensor_from_jagged(values, offsets=offsets),
+            "teacher_ids": torch.nested.nested_tensor_from_jagged(ids, offsets=offsets),
+        },
+        batch_size=[],
+    )
+    config = SimpleNamespace(policy_loss={"sdpo_alpha": 0.5, "sdpo_distillation_add_tail": True})
+    student_logits = torch.randn(1, 2, 4)
+
+    with pytest.raises(RuntimeError, match="Non-finite SDPO teacher top-k logprobs"):
+        sdpo_losses._sdpo_topk_logits_processor(config, student_logits=student_logits, data=data)
 
 
 def test_response_shaped_sampled_teacher_logprobs_are_not_unpadded_as_full_sequence():

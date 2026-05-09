@@ -1412,6 +1412,20 @@ class RayPPOTrainer:
         metrics = tu.get(output, "metrics") or {}
         topk_log_probs = no_padding_2_padding(topk_log_probs, batch_td).float()
         topk_ids = no_padding_2_padding(topk_ids, batch_td).to(torch.long)
+        if not bool(torch.isfinite(topk_log_probs).all().item()):
+            finite_mask = torch.isfinite(topk_log_probs)
+            bad_count = int((~finite_mask).sum().item())
+            first_bad = (~finite_mask).nonzero(as_tuple=False)[0].detach().cpu().tolist()
+            finite_values = topk_log_probs[finite_mask]
+            finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
+            finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")
+            phase = "ema_ref_teacher" if use_ref else "actor_student"
+            raise RuntimeError(
+                "Non-finite SDPO top-k logprobs detected "
+                f"phase={phase} step={int(self.global_steps)} gather_teacher_ids={gather_response_ids is not None} "
+                f"shape={tuple(topk_log_probs.shape)} bad_count={bad_count} first_bad={first_bad} "
+                f"finite_min={finite_min} finite_max={finite_max}"
+            )
         return (
             DataProto.from_tensordict(
                 tu.get_tensordict({"teacher_logprobs": topk_log_probs, "teacher_ids": topk_ids})

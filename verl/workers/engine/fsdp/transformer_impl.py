@@ -1122,7 +1122,24 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         topk = min(distillation_topk, logits_rmpad.shape[-1])
                         topk_logits_rmpad, topk_indices_rmpad = torch.topk(logits_rmpad, topk, dim=-1)
 
-                    topk_log_probs_rmpad = topk_logits_rmpad - torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
+                    log_norm_rmpad = torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
+                    topk_log_probs_rmpad = topk_logits_rmpad - log_norm_rmpad
+                    if not bool(torch.isfinite(topk_log_probs_rmpad).all().item()):
+                        topk_finite = torch.isfinite(topk_log_probs_rmpad)
+                        topk_bad_count = int((~topk_finite).sum().item())
+                        first_bad = (~topk_finite).nonzero(as_tuple=False)[0].detach().cpu().tolist()
+                        log_norm_bad_count = int((~torch.isfinite(log_norm_rmpad)).sum().item())
+                        topk_logits_bad_count = int((~torch.isfinite(topk_logits_rmpad)).sum().item())
+                        logits_bad_count = int((~torch.isfinite(logits_rmpad)).sum().item())
+                        raise RuntimeError(
+                            "Non-finite SDPO top-k logprobs inside FSDP forward "
+                            f"distillation_gather_topk={distillation_gather_topk} "
+                            f"distillation_return_topk={distillation_return_topk} "
+                            f"logits_shape={tuple(logits_rmpad.shape)} topk_shape={tuple(topk_log_probs_rmpad.shape)} "
+                            f"topk_bad_count={topk_bad_count} first_bad={first_bad} "
+                            f"log_norm_bad_count={log_norm_bad_count} "
+                            f"topk_logits_bad_count={topk_logits_bad_count} logits_bad_count={logits_bad_count}"
+                        )
                     if self.use_ulysses_sp:
                         pad_size = output_args["pad_size"]
                         topk_log_probs_rmpad = gather_outputs_and_unpad(

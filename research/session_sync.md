@@ -2,6 +2,13 @@
 
 Last Updated: 2026-05-09
 
+### 2026-05-09 SDPO NaN fail-fast diagnostics
+
+- W&B run `0xcb5ugy` completed 100/100 steps but became numerically invalid from step 3 onward: `actor/loss`, `actor/grad_norm`, and `actor/self_distillation/teacher_topk_mass` were `NaN`, while `actor/self_distillation/student_topk_mass` stayed finite.
+- Codex added fail-fast diagnostics to stop at the first non-finite SDPO value instead of letting W&B finish quietly with corrupted metrics.
+- New runtime checks cover: actor/teacher finite parameters before EMA update, FSDP full-logit/top-k logprob finite checks, trainer return-boundary finite checks, and actor-loss teacher top-k logprob finite checks.
+- Enable with `SDPO_EMA_FINITE_CHECK=1` and `SDPO_FAIL_FAST_NONFINITE=1`; keep `SDPO_LOGPROB_DIAGNOSTICS=1`, `SDPO_CUDA_MEMORY_DIAGNOSTICS=1`, and `HYDRA_FULL_ERROR=1` for the short P5 reproduction run.
+
 ### 2026-05-09 True-8K SDPO OOM and 6K rollout-collection recipe
 
 - Pulled W&B run `oe1zswum` (`SDPO-vllm-v1-original-sdpo-safe`): this was the direct true-8K recipe, with `data.max_response_length=8192`, `max_model_len=16384`, and `tau3.sdpo.max_reprompt_len=4096`.
