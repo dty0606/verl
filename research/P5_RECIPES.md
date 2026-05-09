@@ -1124,36 +1124,47 @@ mkdir -p ~/tw/logs
 ray stop --force 2>/dev/null || true
 rm -rf /tmp/ray
 
+# Run identity / artifact naming.
 export RUN_STEM=west_p5_original_sdpo_r6k_100step_v1
 export PROJECT_NAME=SDPO-vllm-v1-original-sdpo-safe
 export MODEL_PATH=$HOME/verl_tau3_sdpo/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface
 export MODEL_ALIAS=real_sft_step800
 export TASK_PATH=datasets/tau3_live_airline_canonical_json
 
+# SDPO semantics: original paper-style routing with EMA teacher, no memory bank.
 export SDPO_ARM=original
 export SDPO_TEACHER_BACKEND=ema_ref
 export SDPO_MEMORY_ENABLED=false
 export SDPO_MEMORY_PATH=""
 export SDPO_MAX_REPROMPT_LEN=4096
 
+# Run length / checkpoint cadence. Keep save/test every 10 steps for daytime monitoring.
 export TOTAL_TRAINING_STEPS=100
 export TOTAL_EPOCHS=100
 export TEST_FREQ=10
 export SAVE_FREQ=10
 export MAX_ACTOR_CKPT_TO_KEEP=3
+
+# Training shape: 8 tasks x 8 rollouts = 64 trajectories per step, 1 train microbatch per GPU.
 export TRAIN_BATCH_SIZE=8
 export ROLLOUT_BATCH_SIZE=8
 export PPO_MINI_BATCH_SIZE=8
 export PPO_MICRO_BATCH_SIZE_PER_GPU=1
 export VAL_N=1
 
+# Memory-safety caps: true 8K response reached step 21, then OOMed in actor backward.
+# 6K response keeps long-rollout signal while leaving more backward-pass headroom.
 export MAX_PROMPT_LENGTH=8192
 export MAX_RESPONSE_LENGTH=6144
 export MAX_MODEL_LEN=14336
+
+# Apply the same cap to actor update plus rollout/ref logprob paths.
 export PPO_MAX_TOKEN_LEN_PER_GPU=14336
 export LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
 export ROLLOUT_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
 export REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
+
+# vLLM runtime shape: keep V1 + prefix/chunked prefill, lower KV reservation for FSDP headroom.
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.50
 export TAU3_VLLM_PROFILE=qwen35_v1
 export VLLM_USE_V1=1
@@ -1165,9 +1176,11 @@ export VLLM_LANGUAGE_MODEL_ONLY=true
 export VLLM_KV_CACHE_DTYPE=auto
 export VLLM_CALCULATE_KV_SCALES=false
 
+# Rollout collection: needed for post-OOM UID/task analysis and Memory-SDPO motivation.
 export ROLLOUT_DATA_DIR=~/tw/outputs/${RUN_STEM}/rollout_data
 mkdir -p "$ROLLOUT_DATA_DIR"
 
+# Diagnostics / region. CUDA diagnostics include logprob and actor-update memory snapshots.
 export SDPO_LOGPROB_DIAGNOSTICS=1
 export SDPO_CUDA_MEMORY_DIAGNOSTICS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
