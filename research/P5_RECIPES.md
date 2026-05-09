@@ -1087,3 +1087,102 @@ turn/tool counts, response clip ratio, success count, tokens per success,
 - 1K full-param thinking SFT pilot overfit → use 1 epoch for 5K+ data
 - 9,198 successful thinking-on trajectories generated (Bedrock Opus 4.6 agent, Sonnet 4.6 user sim)
 - Turn expansion: ~9 assistant turns per trajectory → ~82K turn-rows
+
+
+---
+
+## Recipe 11: Guarded Original SDPO — Memory-Safe 100-Step Audit
+
+**Goal**: Run original-style SDPO with EMA teacher, full-logit/top-k JSD loss,
+and target validity guards at memory-safe caps. Produces rollout data for
+response-length/saturation analysis and Memory-SDPO motivation.
+
+**Prerequisites**:
+- `sdpo-vllm20-v1` conda env active
+- SFT checkpoint at `$MODEL_PATH`
+- Branch `codex/guarded-tau3-sdpo-baseline` synced from S3
+- Stale Ray cleaned (`ray stop --force; rm -rf /tmp/ray`)
+
+**Key memory-safety caps** (learned from step-22 OOM at 24K/49K):
+- `MAX_RESPONSE_LENGTH=8192` (was 24576)
+- `MAX_MODEL_LEN=16384` (was 49152)
+- `SDPO_MAX_REPROMPT_LEN=4096` (was 16384; teacher prompt mean is ~2.5K)
+- `ROLLOUT_GPU_MEMORY_UTILIZATION=0.50` (was 0.65)
+
+**Critical**: Call `run_local_tau3_sdpo_live_p5.sh` directly. Do NOT use the
+capacity matrix wrapper (`p5_run_east_original_sdpo_full.sh`) — it overrides
+the memory caps with profile defaults.
+
+```bash
+cd ~/verl_tau3_sdpo_vllm20
+source activate sdpo-vllm20-v1
+
+ray stop --force 2>/dev/null || true
+rm -rf /tmp/ray
+
+export RUN_STEM=west_p5_original_sdpo_true8k_100step_v2
+export PROJECT_NAME=SDPO-vllm-v1-original-sdpo-safe
+export MODEL_PATH=$HOME/verl_tau3_sdpo/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface
+export MODEL_ALIAS=real_sft_step800
+export TASK_PATH=datasets/tau3_live_airline_canonical_json
+
+export SDPO_ARM=original
+export SDPO_TEACHER_BACKEND=ema_ref
+export SDPO_MEMORY_ENABLED=false
+export SDPO_MEMORY_PATH=""
+export SDPO_MAX_REPROMPT_LEN=4096
+
+export TOTAL_TRAINING_STEPS=100
+export TOTAL_EPOCHS=100
+export TEST_FREQ=10
+export SAVE_FREQ=10
+export MAX_ACTOR_CKPT_TO_KEEP=3
+export TRAIN_BATCH_SIZE=8
+export ROLLOUT_BATCH_SIZE=8
+export PPO_MINI_BATCH_SIZE=8
+export PPO_MICRO_BATCH_SIZE_PER_GPU=1
+export VAL_N=1
+
+export MAX_PROMPT_LENGTH=8192
+export MAX_RESPONSE_LENGTH=8192
+export MAX_MODEL_LEN=16384
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.50
+
+export ROLLOUT_DATA_DIR=~/tw/outputs/${RUN_STEM}/rollout_data
+mkdir -p "$ROLLOUT_DATA_DIR"
+
+export SDPO_LOGPROB_DIAGNOSTICS=1
+export SDPO_CUDA_MEMORY_DIAGNOSTICS=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export AWS_REGION=us-west-2
+export AWS_DEFAULT_REGION=us-west-2
+
+nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" json \
+  > ~/tw/logs/${RUN_STEM}.nohup.log 2>&1 &
+echo $! > ~/tw/logs/${RUN_STEM}.pid
+disown
+echo "PID: $(cat ~/tw/logs/${RUN_STEM}.pid)"
+```
+
+**Check progress**:
+```bash
+tail -3 ~/tw/logs/${RUN_STEM}.nohup.log
+grep "Training Progress" ~/tw/logs/${RUN_STEM}.nohup.log | tail -1
+```
+
+**Verify config landed correctly** (from W&B or early log):
+- `data.max_response_length=8192`
+- `max_model_len=16384`
+- `tau3.sdpo.max_reprompt_len=4096`
+- `trainer.rollout_data_dir` is set and non-empty
+
+**Stop if**:
+- OOM before step 10
+- `response_mask_max` exceeds 8192 in diagnostics
+- W&B config shows 24576 or 49152 (capacity matrix override leaked)
+
+**Post-run analysis**:
+- Pull rollout JSONLs from `$ROLLOUT_DATA_DIR` for steps showing high `response_length/clip_ratio`
+- Check which UIDs produce saturated responses (8192 tokens)
+- Inspect target guard metrics: `target_guard_response_saturated_selected_fraction`
+- Compare `val/pass^1` curve against GRPO step 270 baseline (0.512)
