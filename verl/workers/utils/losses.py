@@ -73,6 +73,63 @@ def _validate_topk_log_probs(name: str, log_probs: torch.Tensor, *, tolerance: f
         )
 
 
+def _sdpo_response_prediction_position_mask(data: TensorDict, total_nnz: int, device: torch.device) -> torch.Tensor:
+    """Return the no-padding positions that predict response tokens.
+
+    Full-logit SDPO stores top-k tensors in full-sequence layout before
+    no-padding conversion. Positions outside the response prediction slice are
+    intentionally zero-filled placeholders and must not be treated as
+    probability distributions during actor-loss validation.
+    """
+    required = {"prompts", "responses", "attention_mask"}
+    if not required.issubset(set(data.keys())):
+        return torch.ones((1, total_nnz), dtype=torch.bool, device=device)
+
+    prompt_ids = data["prompts"]
+    response_ids = data["responses"]
+    if prompt_ids.is_nested or response_ids.is_nested:
+        prompt_lens = prompt_ids.offsets().diff().to(device=device, dtype=torch.long)
+        response_lens = response_ids.offsets().diff().to(device=device, dtype=torch.long)
+    else:
+        attention_mask = data["attention_mask"]
+        if attention_mask.is_nested:
+            return torch.ones((1, total_nnz), dtype=torch.bool, device=device)
+        prompt_width = prompt_ids.shape[1]
+        prompt_lens = attention_mask[:, :prompt_width].sum(dim=1).to(device=device, dtype=torch.long)
+        response_lens = attention_mask[:, prompt_width : prompt_width + response_ids.shape[1]].sum(
+            dim=1
+        ).to(device=device, dtype=torch.long)
+
+    sequence_lens = prompt_lens + response_lens
+    if sequence_lens.numel() == 0:
+        return torch.zeros((1, total_nnz), dtype=torch.bool, device=device)
+    if int(sequence_lens.sum().item()) != int(total_nnz):
+        raise RuntimeError(
+            "Cannot align SDPO response prediction mask with no-padding logits: "
+            f"sum(sequence_lens)={int(sequence_lens.sum().item())} total_nnz={total_nnz}"
+        )
+
+    mask = torch.zeros(total_nnz, dtype=torch.bool, device=device)
+    sequence_offsets = sequence_lens.cumsum(dim=0)
+    for resp_len, seq_offset, prompt_len in zip(response_lens, sequence_offsets, prompt_lens, strict=True):
+        resp_len_int = int(resp_len.item())
+        if resp_len_int <= 0:
+            continue
+        if int(prompt_len.item()) <= 0:
+            raise RuntimeError("SDPO response prediction mask requires non-empty prompts")
+        start = int(seq_offset.item()) - resp_len_int - 1
+        end = int(seq_offset.item()) - 1
+        mask[start:end] = True
+    return mask.unsqueeze(0)
+
+
+def _safe_topk_log_probs_like(log_probs: torch.Tensor) -> torch.Tensor:
+    """Build a finite, valid placeholder distribution for masked positions."""
+    safe = torch.full_like(log_probs, -1.0e9)
+    safe[..., 0] = 0.0
+    return safe
+
+
 def _add_tail_log_prob(log_probs: torch.Tensor) -> torch.Tensor:
     """Append a residual probability bucket for top-k distillation."""
     log_probs = log_probs.float()
@@ -150,16 +207,29 @@ def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tenso
 
     teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0).to(student_logits.device)
     teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0).to(device=student_logits.device, dtype=torch.long)
+    response_prediction_mask = _sdpo_response_prediction_position_mask(
+        data, total_nnz=teacher_topk_log_probs.shape[1], device=student_logits.device
+    )
 
     if get_ulysses_sequence_parallel_world_size() > 1:
         teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1)
         teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1)
+        response_prediction_mask = slice_input_tensor(response_prediction_mask, dim=1)
 
     if teacher_topk_log_probs.shape[:2] != student_logits.shape[:2]:
         raise ValueError(
             "SDPO top-k teacher tensors must align with actor logits; "
             f"got teacher={tuple(teacher_topk_log_probs.shape)} actor={tuple(student_logits.shape)}"
         )
+    if response_prediction_mask.shape != student_logits.shape[:2]:
+        raise ValueError(
+            "SDPO response prediction mask must align with actor logits; "
+            f"got mask={tuple(response_prediction_mask.shape)} actor={tuple(student_logits.shape)}"
+        )
+    safe_topk_log_probs = _safe_topk_log_probs_like(teacher_topk_log_probs)
+    teacher_topk_log_probs = torch.where(
+        response_prediction_mask.unsqueeze(-1), teacher_topk_log_probs, safe_topk_log_probs
+    )
     _raise_if_nonfinite_tensor("teacher_topk_log_probs reached actor loss", teacher_topk_log_probs)
 
     if _sdpo_fail_fast_nonfinite_enabled():
@@ -168,7 +238,7 @@ def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tenso
     if _sdpo_fail_fast_nonfinite_enabled():
         _raise_if_nonfinite_tensor("actor_student_log_probs", student_log_probs)
         vocab_size = student_logits.shape[-1]
-        bad_ids = (teacher_topk_ids < 0) | (teacher_topk_ids >= vocab_size)
+        bad_ids = ((teacher_topk_ids < 0) | (teacher_topk_ids >= vocab_size)) & response_prediction_mask.unsqueeze(-1)
         if bool(bad_ids.any().item()):
             first_bad = bad_ids.nonzero(as_tuple=False)[0]
             bad_index = first_bad.detach().cpu().tolist()
@@ -179,6 +249,9 @@ def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tenso
                 f"first_bad={bad_index} value={bad_value}"
             )
     student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
+    student_topk_log_probs = torch.where(
+        response_prediction_mask.unsqueeze(-1), student_topk_log_probs, _safe_topk_log_probs_like(student_topk_log_probs)
+    )
     if _sdpo_fail_fast_nonfinite_enabled():
         _raise_if_nonfinite_tensor("actor_student_topk_log_probs", student_topk_log_probs)
 

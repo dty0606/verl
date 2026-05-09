@@ -167,6 +167,44 @@ def test_sdpo_topk_logits_processor_fails_fast_on_student_nan(monkeypatch):
         sdpo_losses._sdpo_topk_logits_processor(config, student_logits=student_logits, data=data)
 
 
+def test_sdpo_topk_logits_processor_ignores_non_response_prediction_rows(monkeypatch):
+    monkeypatch.setenv("SDPO_FAIL_FAST_NONFINITE", "1")
+    # Full sequence: three prompt tokens plus two response tokens. Only the
+    # prompt-last and first response-token positions predict response tokens.
+    topk = 2
+    values = torch.zeros(5, topk)
+    values[2] = torch.log_softmax(torch.tensor([1.0, 0.0]), dim=-1)
+    values[3] = torch.log_softmax(torch.tensor([0.0, 1.0]), dim=-1)
+    ids = torch.zeros(5, topk, dtype=torch.long)
+    ids[2] = torch.tensor([1, 2])
+    ids[3] = torch.tensor([2, 3])
+    offsets = torch.tensor([0, 5], dtype=torch.long)
+    data = TensorDict(
+        {
+            "teacher_logprobs": torch.nested.nested_tensor_from_jagged(values, offsets=offsets),
+            "teacher_ids": torch.nested.nested_tensor_from_jagged(ids, offsets=offsets),
+            "prompts": torch.tensor([[10, 11, 12]]),
+            "responses": torch.tensor([[13, 14]]),
+            "attention_mask": torch.tensor([[1, 1, 1, 1, 1]]),
+        },
+        batch_size=[],
+    )
+    config = SimpleNamespace(policy_loss={"sdpo_alpha": 0.5, "sdpo_distillation_add_tail": True})
+    student_logits = torch.full((1, 5, 4), -10.0)
+    # These invalid rows would have mass > 1 if zero-filled placeholder top-k
+    # IDs/logprobs were validated as real distributions.
+    student_logits[0, [0, 1, 4], 0] = 10.0
+    student_logits[0, 2, [1, 2]] = torch.tensor([1.0, 0.0])
+    student_logits[0, 3, [2, 3]] = torch.tensor([0.0, 1.0])
+
+    output = sdpo_losses._sdpo_topk_logits_processor(config, student_logits=student_logits, data=data)
+
+    assert torch.isfinite(output["sdpo_distillation_losses"]).all()
+    assert output["sdpo_distillation_losses"].shape == torch.Size([1, 5])
+    assert output["sdpo_student_mass"][0, 0].item() == pytest.approx(1.0)
+    assert output["sdpo_teacher_mass"][0, 4].item() == pytest.approx(1.0)
+
+
 def test_response_shaped_sampled_teacher_logprobs_are_not_unpadded_as_full_sequence():
     data = TensorDict(
         {

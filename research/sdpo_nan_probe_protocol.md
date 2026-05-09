@@ -9,6 +9,8 @@ This note records the current NaN diagnosis strategy for Tau3 SDPO.
 - The step-3 NaN was not a length spike: response max was lower than step 2, and CUDA memory was not near OOM.
 - A later 5-step fail-fast rerun with the same core r4k/b4n8 recipe reached `5/5` locally with finite loss/grad/top-k mass.
 - Therefore the NaN has not reproduced deterministically from the high-level recipe alone. It is likely sensitive to rollout nondeterminism, model numeric path, or a rare batch/tensor state.
+- The 30-step P5 fail-fast rerun archived as `research/diagnostics/sdpo_nan_probe_30step_student_topk_mass.tgz` caught the first concrete bug before step 1 completed: `student_topk_log_probs` had invalid top-k mass at no-padding position `[0, 3767]`, repeated across ranks.
+- Root cause for that run: full-sequence top-k tensors use zero-filled placeholders outside response-prediction positions, but actor loss validated/gathered all no-padding positions. Non-response placeholder rows are not probability distributions and must be sanitized or ignored before top-k/JSD validation.
 
 ## Probe Goal
 
@@ -51,6 +53,18 @@ The current instrumentation checks:
 Masked-out NaNs can still poison sequence aggregations through `0 * NaN = NaN`.
 
 The SDPO loss now zeroes masked-out full-logit distillation loss before aggregation, and sequence aggregation modes use `torch.where(mask, loss, 0)` rather than direct multiplication.
+
+## Response-Prediction Mask Fix
+
+Full-logit SDPO places response-token top-k support at full-sequence prediction
+positions: the final prompt token predicts response token 0, response token 0
+predicts response token 1, and so on. All other full-sequence positions are
+zero-filled placeholders.
+
+Actor update must not validate those placeholder rows as distributions. The loss
+path now derives the no-padding response-prediction-position mask, validates
+top-k IDs only on those positions, and replaces non-response rows with a finite
+degenerate distribution before JSD/tail computation.
 
 ## P5 Reproduction Recipe
 
