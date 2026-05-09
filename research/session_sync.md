@@ -2,6 +2,13 @@
 
 Last Updated: 2026-05-09
 
+### 2026-05-09 True-8K SDPO OOM and 6K rollout-collection recipe
+
+- Pulled W&B run `oe1zswum` (`SDPO-vllm-v1-original-sdpo-safe`): this was the direct true-8K recipe, with `data.max_response_length=8192`, `max_model_len=16384`, and `tau3.sdpo.max_reprompt_len=4096`.
+- The run logged through `training/global_step=21` and then OOMed at step 22 during actor update/backward (`loss.backward()`), not checkpoint save and not teacher/student logprob. Step-22 pre-logprob diagnostics showed `actor_student response_mask_mean=3176.45`, `response_mask_max=7737`, and `attention_mask_mean=8190.55`.
+- Kiro commit `ef76032e` added Recipe 11 with `ROLLOUT_DATA_DIR`, fixing the missing rollout-data issue from the prior run. Codex then revised Recipe 11 to a safer 6K response-cap rollout collection run: `MAX_RESPONSE_LENGTH=6144`, `MAX_MODEL_LEN=14336`, explicit logprob/actor token caps `14336`, diagnostics enabled, and fallback to `4096/12288` if it OOMs before step 30.
+- Codex also added actor-update CUDA diagnostics in `ActorRolloutRefWorker.update_actor`, so future actor-backward OOMs should emit `[sdpo_cuda_memory] phase=actor_update event=exception` in the nohup log and successful steps should log `actor/cuda_memory/*`.
+
 ### 2026-05-09 Tau3 SDPO OOM diagnosis and safe audit recipe
 
 - A 3-step original SDPO smoke on P5 passed after the EMA teacher device/checkpoint fixes: actor checkpoint, optimizer shards, and `sdpo_ema_teacher` shards were saved.

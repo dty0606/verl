@@ -1091,7 +1091,7 @@ turn/tool counts, response clip ratio, success count, tokens per success,
 
 ---
 
-## Recipe 11: Guarded Original SDPO — Memory-Safe 100-Step Audit
+## Recipe 11: Guarded Original SDPO — 6K Rollout-Collection Audit
 
 **Goal**: Run original-style SDPO with EMA teacher, full-logit/top-k JSD loss,
 and target validity guards at memory-safe caps. Produces rollout data for
@@ -1103,11 +1103,14 @@ response-length/saturation analysis and Memory-SDPO motivation.
 - Branch `codex/guarded-tau3-sdpo-baseline` synced from S3
 - Stale Ray cleaned (`ray stop --force; rm -rf /tmp/ray`)
 
-**Key memory-safety caps** (learned from step-22 OOM at 24K/49K):
-- `MAX_RESPONSE_LENGTH=8192` (was 24576)
-- `MAX_MODEL_LEN=16384` (was 49152)
+**Key memory-safety caps** (learned from the true-8K step-22 actor-backward OOM):
+- `MAX_RESPONSE_LENGTH=6144` (true 8K reached step 21, then OOMed during actor backward)
+- `MAX_MODEL_LEN=14336` (`8192 prompt + 6144 response`)
 - `SDPO_MAX_REPROMPT_LEN=4096` (was 16384; teacher prompt mean is ~2.5K)
 - `ROLLOUT_GPU_MEMORY_UTILIZATION=0.50` (was 0.65)
+
+If this still OOMs before step 30, rerun the same recipe with
+`MAX_RESPONSE_LENGTH=4096` and `MAX_MODEL_LEN=12288`.
 
 **Critical**: Call `run_local_tau3_sdpo_live_p5.sh` directly. Do NOT use the
 capacity matrix wrapper (`p5_run_east_original_sdpo_full.sh`) — it overrides
@@ -1117,10 +1120,11 @@ the memory caps with profile defaults.
 cd ~/verl_tau3_sdpo_vllm20
 source activate sdpo-vllm20-v1
 
+mkdir -p ~/tw/logs
 ray stop --force 2>/dev/null || true
 rm -rf /tmp/ray
 
-export RUN_STEM=west_p5_original_sdpo_true8k_100step_v2
+export RUN_STEM=west_p5_original_sdpo_r6k_100step_v1
 export PROJECT_NAME=SDPO-vllm-v1-original-sdpo-safe
 export MODEL_PATH=$HOME/verl_tau3_sdpo/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface
 export MODEL_ALIAS=real_sft_step800
@@ -1144,9 +1148,22 @@ export PPO_MICRO_BATCH_SIZE_PER_GPU=1
 export VAL_N=1
 
 export MAX_PROMPT_LENGTH=8192
-export MAX_RESPONSE_LENGTH=8192
-export MAX_MODEL_LEN=16384
+export MAX_RESPONSE_LENGTH=6144
+export MAX_MODEL_LEN=14336
+export PPO_MAX_TOKEN_LEN_PER_GPU=14336
+export LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
+export ROLLOUT_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
+export REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.50
+export TAU3_VLLM_PROFILE=qwen35_v1
+export VLLM_USE_V1=1
+export VLLM_ENABLE_PREFIX_CACHING=true
+export VLLM_ENABLE_CHUNKED_PREFILL=true
+export VLLM_MAX_NUM_BATCHED_TOKENS=8192
+export VLLM_ENFORCE_EAGER=false
+export VLLM_LANGUAGE_MODEL_ONLY=true
+export VLLM_KV_CACHE_DTYPE=auto
+export VLLM_CALCULATE_KV_SCALES=false
 
 export ROLLOUT_DATA_DIR=~/tw/outputs/${RUN_STEM}/rollout_data
 mkdir -p "$ROLLOUT_DATA_DIR"
@@ -1171,14 +1188,14 @@ grep "Training Progress" ~/tw/logs/${RUN_STEM}.nohup.log | tail -1
 ```
 
 **Verify config landed correctly** (from W&B or early log):
-- `data.max_response_length=8192`
-- `max_model_len=16384`
+- `data.max_response_length=6144`
+- `max_model_len=14336`
 - `tau3.sdpo.max_reprompt_len=4096`
 - `trainer.rollout_data_dir` is set and non-empty
 
 **Stop if**:
 - OOM before step 10
-- `response_mask_max` exceeds 8192 in diagnostics
+- `response_mask_max` exceeds 6144 in diagnostics
 - W&B config shows 24576 or 49152 (capacity matrix override leaked)
 
 **Post-run analysis**:

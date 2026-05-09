@@ -876,7 +876,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
-        output = self.actor.train_mini_batch(data=data)
+        memory_before = _begin_sdpo_cuda_memory_diagnostics("actor_update")
+        try:
+            output = self.actor.train_mini_batch(data=data)
+        except Exception as exc:
+            _finish_sdpo_cuda_memory_diagnostics(
+                "actor_update",
+                memory_before,
+                event="exception",
+                error=exc,
+            )
+            raise
+        memory_metrics = _finish_sdpo_cuda_memory_diagnostics("actor_update", memory_before)
+        output = _attach_sdpo_cuda_memory_metrics(output, memory_metrics)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
