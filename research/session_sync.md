@@ -8,6 +8,9 @@ Last Updated: 2026-05-09
 - Codex added fail-fast diagnostics to stop at the first non-finite SDPO value instead of letting W&B finish quietly with corrupted metrics.
 - New runtime checks cover: actor/teacher finite parameters before EMA update, FSDP full-logit/top-k logprob finite checks, trainer return-boundary finite checks, and actor-loss teacher top-k logprob finite checks.
 - Enable with `SDPO_EMA_FINITE_CHECK=1` and `SDPO_FAIL_FAST_NONFINITE=1`; keep `SDPO_LOGPROB_DIAGNOSTICS=1`, `SDPO_CUDA_MEMORY_DIAGNOSTICS=1`, and `HYDRA_FULL_ERROR=1` for the short P5 reproduction run.
+- Follow-up commit `293a986b` strengthens the NaN probe from passive observation into first-touch classification. It adds fail-fast checks for raw/scaled FSDP logits, temperature, actor-side student logits/logprobs/gathered top-k, top-k mass validity, tail/JSD terms, selected SDPO per-token loss, gradients before optimizer step, actor params after optimizer step, and teacher params after EMA update.
+- The same commit fixes a propagation hazard where masked-out NaNs could still contaminate sequence-level aggregation via `0 * NaN`, and documents the bounded probe recipe in `research/sdpo_nan_probe_protocol.md`.
+- Current best diagnosis: the old NaN most likely originated in teacher-side SDPO distribution construction (`teacher_topk_log_probs` / teacher logsumexp / teacher gathered top-k / tail-JSD), with masked loss math as a propagation amplifier rather than necessarily the first cause. The 5-step fail-fast rerun did not deterministically reproduce the old step-3 NaN, so the next P5 run should use the first-touch labels rather than repeated blind reruns.
 
 ### 2026-05-09 True-8K SDPO OOM and 6K rollout-collection recipe
 
