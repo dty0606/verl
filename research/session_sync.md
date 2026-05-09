@@ -714,6 +714,15 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - New/important metrics: `self_distillation/teacher_backend_ema_ref`, `self_distillation/teacher_backend_actor_snapshot`, `self_distillation/full_logit_distillation`, `self_distillation/distillation_topk`, `self_distillation/student_topk_mass`, `self_distillation/teacher_topk_mass`, `self_distillation/ema_teacher_updated`, `self_distillation/target_guard_selected_fraction`, `self_distillation/target_guard_token_keep_fraction`, and per-reason target-guard fractions.
 - Claim boundary: this is the faithful original-SDPO baseline for Tau3 under the default launch shape, plus Tau3-specific target guardrails. For a no-guard ablation, set `tau3.sdpo.target_guard.enabled=false`; for the old approximation, set `SDPO_FULL_LOGIT_DISTILLATION=false SDPO_ALPHA=1.0`.
 
+### 2026-05-09 SDPO full-logit memory bottleneck and true-8K run correction
+
+- Added `research/sdpo_full_logit_memory_bottleneck.md` to document the current systems bottleneck: faithful SDPO full-logit/top-k/JSD uses transient `[tokens, vocab]` logits tensors for student top-k, EMA teacher gather, and actor-update loss, so Tau3 multi-turn response spikes can OOM even with a 4B model on 80GB GPUs.
+- Pulled W&B run `rag0ih8i` from project `SDPO-vllm-v1-original-sdpo-safe`. The run name said `safe_8kreprompt4k`, but actual W&B config was `data.max_prompt_length=8192`, `data.max_response_length=24576`, `max_model_len=49152`, and `tau3.sdpo.max_reprompt_len=4096`. The 8K response cap did **not** apply.
+- Root cause: `scripts/p5_run_east_original_sdpo_full.sh` invokes `scripts/p5_run_vllm_v1_capacity_matrix.sh`, and selected profile `02_auto_prefix_24k_48k` hardcodes `MAX_RESPONSE_LENGTH=24576` and `MAX_MODEL_LEN=49152`, overriding the intended safe response cap.
+- The same W&B run logged steps 1-7 only. `output.log` contains step-8 pre-logprob diagnostics, then no completed `step:8` line: `actor_student attention_mask_max=28749`, `actor_student response_mask_max=23679`, `ema_ref_teacher attention_mask_max=27058`, `ema_ref_teacher response_mask_max=23679`. This strongly supports a step-8 OOM during or soon after SDPO top-k logprob, caused by a near-24K response spike.
+- Completed-step CUDA metrics show actor-student top-k was the largest SDPO logprob phase: step 4 reached `student_peak=31.01 GiB`, `teacher_peak=27.23 GiB` with `response_length/max=5296`. Step 8's `response_mask_max=23679` is far larger and was not W&B-committed as a completed training row.
+- Correct next safe test: bypass `p5_run_vllm_v1_capacity_matrix.sh` or add an env-driven custom profile. Use `run_local_tau3_sdpo_live_p5.sh` directly with `MAX_PROMPT_LENGTH=8192`, `MAX_RESPONSE_LENGTH=8192`, `SDPO_MAX_REPROMPT_LEN=4096`, `MAX_MODEL_LEN=16384`, logprob microbatch size 1, diagnostics enabled, and NVME paths for logs/checkpoints/Ray/W&B.
+
 ## Evidence Carried Forward
 
 From the old repo:
