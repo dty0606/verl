@@ -43,6 +43,35 @@ num_response_tokens x top_k
 
 The expensive part is the transient full-vocab projection and normalization.
 
+## One-Page Token And Memory Map
+
+This table is the current mental model for Tau3 SDPO memory. It separates
+tokens that shape the forward pass from tokens that actually receive SDPO loss.
+
+| Component | Symbol | Where it comes from | Student input? | Teacher input? | Full-vocab LM head today? | SDPO loss / backprop? | Main control knob | Optimization question |
+|---|---:|---|---:|---:|---:|---:|---|---|
+| Original task/system/dialogue prompt | `P_fail` | Dataset prompt plus chat template, tools, policy, current user state | Yes | No, replaced by reprompt | Yes, because current packed forward projects prompt+response | No direct loss, but prompt states condition response tokens | `MAX_PROMPT_LENGTH` | Can we avoid projecting prompt positions through LM head and only project response prediction positions? |
+| Failed rollout response, including thinking/tool text | `R_fail` | Actor-generated failed trajectory used as SDPO target | Yes | Yes | Yes | Yes for response-mask tokens; gradients update actor/student only | `MAX_RESPONSE_LENGTH`, target guard masks | Should thinking tokens receive SDPO JSD loss, or should we mask/strip parts of reasoning/tool chatter? |
+| Teacher reprompt scaffold | `P'_base` | SDPO instruction/template around feedback or peer demo | No | Yes | Yes today | No direct loss | `SDPO_MAX_REPROMPT_LEN` | Can we make teacher context shorter without losing corrective signal? |
+| Environment feedback | `F` | Tau3 evaluator feedback / diagnostic JSON for failed rollout | No | Often yes in original arm | Yes if included in `P'_fail` | No direct loss | feedback serialization, `SDPO_MAX_REPROMPT_LEN` | Can note-style summaries preserve the useful correction with fewer tokens? |
+| Successful peer demo | `D_success` | First eligible successful rollout from same UID/group, assistant response only after stripping | No | Yes when available | Yes if included in `P'_fail` | No direct loss | peer selection + stripping policy | Should we choose shortest/cleanest/highest-margin success instead of first success? |
+| Teacher reprompt total | `P'_fail = P'_base + F/D_success` | Built by SDPO teacher batch construction | No | Yes | Yes today | No direct loss | `SDPO_MAX_REPROMPT_LEN` | Can memory/note SDPO compress `F`/`D_success` while keeping task-specific guidance? |
+| Student forward length per row | `T_s = len(P_fail)+len(R_fail)` | Original context plus failed response | Yes | No | `T_s x V` transient | Response positions only | prompt/response caps, logprob microbatch | Can we compute logits only at response prediction positions? |
+| Teacher forward length per row | `T_t = len(P'_fail)+len(R_fail)` | Reprompt plus same failed response | No | Yes | `T_t x V` transient | No teacher backprop; probabilities supervise student | reprompt/response caps | Can teacher compute only student top-k token logits instead of full vocab? |
+| Per-rank packed tokens | `S_rank = sum(T_i)` | Multiple rollout rows assigned to one DP rank after length balancing | Yes | Yes, separately | `S_rank x V` transient in worst packed/microbatch case | Depends on response masks | `*_MAX_TOKEN_LEN_PER_GPU`, microbatch/dynamic bsz | Should we enforce smaller logprob microbatches or token caps even if slower? |
+| Vocabulary dimension | `V` | Model tokenizer / LM head size, about 150K for Qwen3.5 | Yes | Yes | Multiplies every projected position | Needed for exact softmax/top-k today | model choice only | Can chunked vocab projection or selected-vocab projection preserve exact/near-exact SDPO? |
+| Distillation support | `K=100 + tail` | Student top-k IDs plus optional residual probability tail | Yes | Teacher gathers on student support | Stored as `response_tokens x K`, after full projection | Yes | `SDPO_DISTILLATION_TOPK`, `SDPO_DISTILLATION_ADD_TAIL` | Is smaller `K`, adaptive `K`, or sampled-token SDPO enough for Tau3? |
+
+Approximate transient BF16 logit memory per forward is:
+
+```text
+bytes ~= projected_tokens x vocab_size x 2
+```
+
+The important distinction: the **loss mask is response-only**, but the **current
+full-vocab projection is prompt-plus-response**. That gap is the main engineering
+opening.
+
 ## Real Step-10 Scale From P5 Artifact
 
 Artifact: `research/diagnostics/sdpo_vanilla_peer_full.zip`, member
