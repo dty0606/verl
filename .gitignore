@@ -131,3 +131,9 @@ logs
 log
 outputs
 .history
+
+# local promoted diagnostics/log archives should live under D:\AI_research\sdop\logs or S3, not Git
+research/diagnostics/*.tgz
+research/diagnostics/*.tar.gz
+research/diagnostics/*.zip
+research/diagnostics/*.log.gz
