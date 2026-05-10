@@ -533,6 +533,22 @@ class FSDPEngine(BaseEngine):
                 continue
             yield name, param
 
+    def _named_optimizer_state_for_finite_check(self):
+        param_names = {id(param): name for name, param in self._named_parameters_for_finite_check()}
+        for group_idx, group in enumerate(self.optimizer.param_groups):
+            for param_idx, param in enumerate(group["params"]):
+                param_name = param_names.get(id(param), f"param_group_{group_idx}.param_{param_idx}")
+                state = self.optimizer.state.get(param)
+                if not state:
+                    continue
+                for state_name, state_value in state.items():
+                    if isinstance(state_value, torch.Tensor):
+                        yield f"{param_name}.optimizer_state.{state_name}", state_value
+                    elif isinstance(state_value, dict):
+                        for sub_name, sub_value in state_value.items():
+                            if isinstance(sub_value, torch.Tensor):
+                                yield f"{param_name}.optimizer_state.{state_name}.{sub_name}", sub_value
+
     def _freeze_vision_tower_params(self, module):
         if not bool(self.model_config.get("freeze_vision_tower", False)):
             return
@@ -738,6 +754,12 @@ class FSDPEngine(BaseEngine):
 
         ctx = torch.no_grad() if forward_only else nullcontext()
 
+        if _sdpo_fail_fast_nonfinite_enabled() and not forward_only:
+            _raise_first_nonfinite_named_tensor(
+                self._named_parameters_for_finite_check(),
+                phase="actor parameter before backward",
+            )
+
         # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
         # and _build_fsdp_module, so self.scaler may not be set.
         scaler = getattr(self, "scaler", None)
@@ -747,6 +769,11 @@ class FSDPEngine(BaseEngine):
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
                 if not forward_only:
+                    if _sdpo_fail_fast_nonfinite_enabled():
+                        _raise_first_nonfinite_named_tensor(
+                            (("actor loss before backward", loss.detach()),),
+                            phase="actor loss before backward",
+                        )
                     if scaler is not None:
                         scaler.scale(loss).backward()
                     else:
@@ -788,6 +815,14 @@ class FSDPEngine(BaseEngine):
                 ((name, param.grad) for name, param in self._named_parameters_for_finite_check()),
                 phase="actor gradient before optimizer step",
             )
+            _raise_first_nonfinite_named_tensor(
+                self._named_parameters_for_finite_check(),
+                phase="actor parameter before optimizer step",
+            )
+            _raise_first_nonfinite_named_tensor(
+                self._named_optimizer_state_for_finite_check(),
+                phase="optimizer state before optimizer step",
+            )
 
         if isinstance(self.module, FSDP):
             grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
@@ -820,6 +855,10 @@ class FSDPEngine(BaseEngine):
             _raise_first_nonfinite_named_tensor(
                 self._named_parameters_for_finite_check(),
                 phase="actor parameter after optimizer step",
+            )
+            _raise_first_nonfinite_named_tensor(
+                self._named_optimizer_state_for_finite_check(),
+                phase="optimizer state after optimizer step",
             )
 
         if self._qat_enabled:

@@ -22,9 +22,14 @@ Do not just observe `actor/loss=NaN`. The probe must identify the first phase th
 4. EMA teacher logprobs gathered on student support.
 5. Actor-side student `log_softmax` or gathered student top-k logprobs.
 6. Top-k tail/JSD terms or selected per-token SDPO loss.
-7. Actor gradients before optimizer step.
-8. Actor parameters after optimizer step.
-9. EMA teacher parameters after EMA update.
+7. Actor parameters before backward.
+8. Scalar actor loss before backward.
+9. Actor gradients before optimizer step.
+10. Actor parameters immediately before optimizer step.
+11. AdamW/FSDP optimizer state immediately before optimizer step.
+12. Actor parameters immediately after optimizer step.
+13. AdamW/FSDP optimizer state immediately after optimizer step.
+14. EMA teacher parameters after EMA update.
 
 ## Current Code Probes
 
@@ -45,7 +50,7 @@ The current instrumentation checks:
 - Trainer-side top-k tensors after no-padding to padding conversion.
 - Actor-loss teacher top-k logprobs always.
 - Actor-loss student logits, student logprobs, gathered student top-k logprobs, JSD terms, and selected per-token SDPO loss when fail-fast is enabled.
-- Actor gradients before optimizer step and actor parameters after optimizer step when fail-fast is enabled.
+- Actor parameters before backward, scalar actor loss before backward, gradients before optimizer step, actor parameters before optimizer step, optimizer state before optimizer step, actor parameters after optimizer step, and optimizer state after optimizer step when fail-fast is enabled.
 - Actor and teacher parameters before EMA update, and teacher parameters after EMA update when fail-fast is enabled.
 
 ## Important Guard Fix
@@ -131,6 +136,32 @@ The extracted P5 log was moved out of Git to:
 ```text
 D:\AI_research\sdop\logs\20260509_212600_sdpo_nan_probe_v3_actor_visual_nan\
 ```
+
+## 2026-05-10 Probe v4 Direction
+
+After vision isolation was pushed, Kiro reported a different first concrete
+failure:
+
+```text
+name=_fsdp_wrapped_module.model.language_model.layers.8._fsdp_wrapped_module._flat_param
+shape=(14115480,) bad_count=1 first_bad=[7079771]
+```
+
+This means the remaining non-finite is now in the SDPO actor-update path for a
+trainable language parameter, not the frozen visual tower. Do not label this as
+"extreme SDPO gradient" until the first bad phase is classified. The next probe
+must distinguish:
+
+- parameter already bad before backward;
+- scalar actor loss or selected SDPO terms bad before backward;
+- local gradient bad after backward;
+- optimizer state bad before the step;
+- finite params/grads/state before step but bad actor parameter after
+  `optimizer.step()`;
+- clean actor update followed by EMA corruption.
+
+The current fail-fast code includes optimizer-step forensics for this exact
+classification.
 
 ## P5 Reproduction Recipe
 
