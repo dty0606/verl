@@ -72,8 +72,9 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
-from verl.utils.tau3_sdpo_target_guard import build_sdpo_target_guard_mask
+from verl.utils.tau3_sdpo_decision_spans import build_sdpo_decision_weight_mask
 from verl.utils.tau3_sdpo_memory import load_memory_bank, render_memory_section, strip_thinking
+from verl.utils.tau3_sdpo_target_guard import build_sdpo_target_guard_mask
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
@@ -1862,6 +1863,9 @@ class RayPPOTrainer:
         memory_no_solution_used = []
         memory_eligible = []
         memory_section_lengths = []
+        task_ids = list(batch.non_tensor_batch.get("task_id", []))
+        if not task_ids:
+            task_ids = list(batch.non_tensor_batch.get("tau3_task_id", []))
         for i in range(batch_size):
             raw_prompt = list(raw_prompts[i]) if i < len(raw_prompts) else []
             prompt_text = raw_prompt[-1].get("content", "") if raw_prompt else ""
@@ -1889,6 +1893,14 @@ class RayPPOTrainer:
                     "\n\n".join(query_parts),
                     mode=memory_mode,
                     rng_key=f"{uids[i] if i < len(uids) else ''}:{i}",
+                    blocked_ids=[
+                        value
+                        for value in (
+                            uids[i] if i < len(uids) else None,
+                            task_ids[i] if i < len(task_ids) else None,
+                        )
+                        if value is not None
+                    ],
                 )
                 if card is not None:
                     memory_section = render_memory_section(card, template=memory_template)
@@ -1984,6 +1996,21 @@ class RayPPOTrainer:
             reward_extra_infos_dict=reward_extra_infos_dict,
             guard_cfg=target_guard_cfg,
         )
+        decision_metrics = {}
+        decision_weight_cfg = sdpo_cfg.get("decision_weighting", {}) or {}
+        if bool(decision_weight_cfg.get("enabled", False)):
+            decision_weights, _, decision_metrics = build_sdpo_decision_weight_mask(
+                response_mask=assistant_response_mask,
+                response_texts=response_texts,
+                active_mask=target_mask,
+                cfg=decision_weight_cfg,
+            )
+            apply_decision_weights = bool(decision_weight_cfg.get("apply_to_loss", False)) and not bool(
+                decision_weight_cfg.get("shadow_mode", True)
+            )
+            decision_metrics["self_distillation/decision_weighting_applied_to_loss"] = float(apply_decision_weights)
+            if apply_decision_weights:
+                target_loss_mask = target_loss_mask * decision_weights.to(target_loss_mask.device)
 
         teacher_batch = DataProto.from_dict(
             tensors={
@@ -2036,6 +2063,7 @@ class RayPPOTrainer:
                 (teacher_prompt_attention_mask.float().sum(dim=1) >= max_reprompt_len).float().mean().item()
             ),
         }
+        metrics.update(decision_metrics)
         selected = target_mask.to(torch.bool)
         selected_count = float(selected.float().sum().item())
         guarded_selected = target_guard_masks["guarded"] & selected

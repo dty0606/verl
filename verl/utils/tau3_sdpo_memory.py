@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
@@ -101,12 +101,47 @@ def _blocked_by_query_entities(payload: dict[str, Any], query_text: str) -> bool
     """Prevent exact known IDs from being used if a card declares leakage blocks."""
 
     query = str(query_text or "").lower()
-    for key in ("blocked_task_ids", "blocked_entity_ids", "blocked_reservation_ids", "blocked_user_ids"):
+    for key in (
+        "blocked_task_ids",
+        "blocked_uids",
+        "blocked_entity_ids",
+        "blocked_reservation_ids",
+        "blocked_user_ids",
+    ):
         for value in payload.get(key) or []:
             text = str(value or "").strip().lower()
             if text and text in query:
                 return True
     return False
+
+
+def _blocked_by_metadata(payload: dict[str, Any], blocked_ids: set[str]) -> bool:
+    if not blocked_ids:
+        return False
+    card_blocked: set[str] = set()
+    for key in ("blocked_task_ids", "blocked_uids", "blocked_entity_ids"):
+        card_blocked.update(str(value) for value in (payload.get(key) or []) if value is not None)
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    for key in ("source_task_id", "source_uid"):
+        if source.get(key) is not None:
+            card_blocked.add(str(source[key]))
+    return bool(card_blocked & blocked_ids)
+
+
+def _is_live_eligible_card(payload: dict[str, Any]) -> bool:
+    """Live Note-SDPO only consumes audited train-active cards."""
+
+    if str(payload.get("split", "")).lower() != "train":
+        return False
+    if str(payload.get("status", "")).lower() != "active":
+        return False
+    leakage_audit = payload.get("leakage_audit")
+    if not isinstance(leakage_audit, dict) or leakage_audit.get("passed") is not True:
+        return False
+    unit_type = str(payload.get("unit_type", "") or "")
+    if unit_type != "teacher_written_decision_note":
+        return False
+    return True
 
 
 class Tau3MemoryBank:
@@ -120,12 +155,15 @@ class Tau3MemoryBank:
         mode: str = "relevant",
         rng_key: str = "",
         max_chars: int = 2200,
+        blocked_ids: Iterable[str] | None = None,
     ) -> Tau3MemoryCard | None:
+        blocked_id_set = {str(value) for value in (blocked_ids or []) if str(value).strip()}
         candidates = [
             card
             for card in self.cards
-            if str(card.payload.get("split", "train")).lower() == "train"
+            if _is_live_eligible_card(card.payload)
             and not _blocked_by_query_entities(card.payload, query_text)
+            and not _blocked_by_metadata(card.payload, blocked_id_set)
         ]
         if not candidates:
             return None

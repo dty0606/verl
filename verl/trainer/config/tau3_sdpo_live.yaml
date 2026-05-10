@@ -149,6 +149,19 @@ tau3:
       repetition_ngram_size: 8
       repetition_max_count: 4
       max_tool_count: 32
+    decision_weighting:
+      enabled: False
+      # Shadow mode emits decision/action-span metrics without changing loss.
+      # Enable apply_to_loss only after offline QC shows the spans do not reward
+      # short unsolved answers.
+      shadow_mode: True
+      apply_to_loss: False
+      base_weight: 1.0
+      decision_span_weight: 1.0
+      tool_action_weight: 1.0
+      write_action_weight: 1.0
+      final_answer_weight: 1.0
+      short_unsolved_chars: 160
     reprompt_template: |-
       {prompt}{solution}{memory}{feedback}
 
