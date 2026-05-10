@@ -100,6 +100,59 @@ def _raise_if_tensor_has_nonfinite(label: str, name: str, tensor: torch.Tensor) 
     )
 
 
+def _raise_if_ema_transfer_has_nonfinite(
+    name: str,
+    source_tensor: torch.Tensor,
+    transferred_tensor: torch.Tensor,
+    *,
+    target_device: torch.device,
+    target_dtype: torch.dtype,
+) -> None:
+    finite_mask = torch.isfinite(transferred_tensor)
+    bad_mask = ~finite_mask
+    bad_count = int(bad_mask.sum().item())
+    if bad_count <= 0:
+        return
+
+    first_bad = bad_mask.nonzero(as_tuple=False)[0].detach().cpu().tolist()
+    source_index = tuple(first_bad)
+    try:
+        source_value = source_tensor[source_index].detach().cpu().item()
+    except Exception:
+        source_value = "<unavailable>"
+    source_finite_mask = torch.isfinite(source_tensor)
+    source_finite_values = source_tensor[source_finite_mask]
+    source_finite_min = (
+        float(source_finite_values.min().detach().cpu().item()) if source_finite_values.numel() else float("nan")
+    )
+    source_finite_max = (
+        float(source_finite_values.max().detach().cpu().item()) if source_finite_values.numel() else float("nan")
+    )
+    source_abs_max = (
+        float(source_finite_values.abs().max().detach().cpu().item()) if source_finite_values.numel() else float("nan")
+    )
+    transferred_finite_values = transferred_tensor[finite_mask]
+    transferred_finite_min = (
+        float(transferred_finite_values.min().detach().cpu().item())
+        if transferred_finite_values.numel()
+        else float("nan")
+    )
+    transferred_finite_max = (
+        float(transferred_finite_values.max().detach().cpu().item())
+        if transferred_finite_values.numel()
+        else float("nan")
+    )
+    raise RuntimeError(
+        "Non-finite actor parameter after SDPO EMA device/dtype transfer "
+        f"name={name} shape={tuple(transferred_tensor.shape)} bad_count={bad_count} first_bad={first_bad} "
+        f"source_value_at_first_bad={source_value} source_dtype={source_tensor.dtype} "
+        f"source_device={source_tensor.device} source_finite_min={source_finite_min} "
+        f"source_finite_max={source_finite_max} source_abs_max={source_abs_max} "
+        f"target_dtype={target_dtype} target_device={target_device} "
+        f"transferred_finite_min={transferred_finite_min} transferred_finite_max={transferred_finite_max}"
+    )
+
+
 def _gib(num_bytes: int | float) -> float:
     return float(num_bytes) / (1024**3)
 
@@ -275,16 +328,19 @@ def ema_update_module_params(
                 )
             if actor_data.device != teacher_param.device or actor_data.dtype != teacher_param.dtype:
                 device_transfer_tensors += 1
+                actor_data_before_transfer = actor_data
                 actor_data = actor_data.to(
                     device=teacher_param.device,
                     dtype=teacher_param.dtype,
                     non_blocking=True,
                 )
                 if check_finite:
-                    _raise_if_tensor_has_nonfinite(
-                        "Non-finite actor parameter after SDPO EMA device/dtype transfer",
+                    _raise_if_ema_transfer_has_nonfinite(
                         actor_name,
+                        actor_data_before_transfer,
                         actor_data,
+                        target_device=teacher_param.device,
+                        target_dtype=teacher_param.dtype,
                     )
             teacher_param.data.mul_(1.0 - update_rate).add_(actor_data, alpha=update_rate)
             if check_finite:

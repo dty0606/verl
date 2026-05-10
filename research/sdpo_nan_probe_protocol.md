@@ -163,6 +163,23 @@ must distinguish:
 The current fail-fast code includes optimizer-step forensics for this exact
 classification.
 
+Probe v4 then showed the bad trainable language actor parameter was still first
+caught inside EMA, but specifically after copying/casting the finite actor shard
+to the teacher device/dtype:
+
+```text
+Non-finite actor parameter after SDPO EMA device/dtype transfer
+name=_fsdp_wrapped_module.model.language_model.layers.9._fsdp_wrapped_module._flat_param
+bad_count=1
+```
+
+This is more specific than "actor param is NaN." The actor-side tensor passed
+the pre-transfer finite check, so the next diagnostic records the source dtype,
+target dtype, source finite min/max/abs-max, and source value at the first bad
+index. If the source value is huge but finite and the target dtype is narrower,
+the immediate mechanism is cast overflow during EMA transfer; the upstream cause
+is still the SDPO actor update producing an unstable finite outlier.
+
 ## P5 Reproduction Recipe
 
 Use the direct SDPO launcher rather than relying on the capacity-matrix wrapper when debugging NaNs.
