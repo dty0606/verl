@@ -764,6 +764,16 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Hardened the text-only path so `freeze_vision_tower=true` marks both actor and ref/EMA HF configs, skips the dummy no-image Qwen3.5 visual forward, excludes frozen/vision params from actor optimizer groups and actor fail-fast finite checks, and skips frozen/vision params during SDPO EMA read/write. Optimizer construction now fails loudly if filtering leaves no trainable params, and EMA skip counts are surfaced in `self_distillation/ema_teacher_skipped_vision_param_tensors_*`.
 - Important safety line: this does **not** disable finite checks for trainable language params. It only treats VLM vision weights as inert for Tau3 airline, matching the `vLLM_LANGUAGE_MODEL_ONLY=true` rollout setting.
 
+### 2026-05-10 SDPO selected-mask placeholder fix and resume protocol
+
+- Overnight original-SDPO r4k/b4n8 reached step 185 before fail-fast stopped with `Invalid SDPO top-k log-prob mass for teacher_topk_log_probs ... max_log_mass=4.605170249938965`. Since `4.605170 ~= log(100)`, the bad row was a zero-filled `topk=100` placeholder (`[0, 0, ..., 0]`) being treated as a real probability slice with mass 100.
+- This was not OOM, not EMA transfer corruption, and not vision-tower corruption. Memory at the failure snapshot was healthy; the stop was a correctness guard doing its job.
+- Root cause: the previous placeholder fix sanitized prompt/non-response positions, but full-logit SDPO can still carry placeholder top-k rows on response-prediction positions that are later excluded by the Tau3 SDPO target/token guard. Validation/JSD must consider the actual selected SDPO target-token mask, not only whether a position predicts a response token.
+- Fix in `verl/workers/utils/losses.py`: build a selected prediction-position mask from `self_distillation_target_token_mask` (falling back to `self_distillation_loss_mask * self_distillation_mask`, then `response_mask`), sanitize all unselected rows to a finite dummy distribution, and validate/gather/JSD only selected rows. Selected rows still fail fast if their top-k mass is invalid.
+- Added regression coverage in `tests/utils/test_tau3_sdpo_full_logit_loss.py` for an unselected response row with zero placeholder top-k logprobs. Local Windows can syntax-check this path, but the focused pytest is skipped unless the heavy training deps (`torch`, `tensordict`) are installed.
+- The launcher now exposes `RESUME_MODE` and `RESUME_FROM_PATH` while preserving the default `RESUME_MODE=auto`. For a crash at step 185 with `SAVE_FREQ=30`, continuation should resume from `global_step_180` if `latest_checkpointed_iteration.txt` exists under `${SDPO_CHECKPOINT_ROOT}/${PROJECT_NAME}/${experiment_name}`.
+- Strongest validation for this fix: pull the latest branch on P5, resume the same run from `global_step_180`, and confirm it passes step 185 and the next checkpoint boundary (`global_step_210`). Do not disable fail-fast to get past this; if another invalid selected row appears, stop and report the new first-bad row.
+
 ## Evidence Carried Forward
 
 From the old repo:

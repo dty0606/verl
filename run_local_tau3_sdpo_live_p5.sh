@@ -191,6 +191,7 @@ ARGS=(
     "trainer.total_training_steps=${TOTAL_TRAINING_STEPS:-300}"
     "trainer.test_freq=${TEST_FREQ:-30}"
     "trainer.save_freq=${SAVE_FREQ:-30}"
+    "trainer.resume_mode=${RESUME_MODE:-auto}"
     "trainer.n_gpus_per_node=${N_GPUS_PER_NODE:-8}"
     "trainer.nnodes=${NNODES:-1}"
 )
@@ -228,6 +229,9 @@ fi
 
 if [ -n "${ROLLOUT_DATA_DIR:-}" ]; then
     ARGS+=("trainer.rollout_data_dir=$ROLLOUT_DATA_DIR")
+fi
+if [ -n "${RESUME_FROM_PATH:-}" ]; then
+    ARGS+=("trainer.resume_from_path=$RESUME_FROM_PATH")
 fi
 if [ -n "${MAX_ACTOR_CKPT_TO_KEEP:-}" ]; then
     ARGS+=("trainer.max_actor_ckpt_to_keep=$MAX_ACTOR_CKPT_TO_KEEP")
@@ -298,6 +302,7 @@ echo "SDPO logprob diagnostics: ${SDPO_LOGPROB_DIAGNOSTICS:-0}"
 echo "SDPO CUDA memory diagnostics: ${SDPO_CUDA_MEMORY_DIAGNOSTICS:-${SDPO_LOGPROB_DIAGNOSTICS:-0}}"
 echo "SDPO target guard: enabled=${SDPO_TARGET_GUARD_ENABLED:-true} corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0} parse_error=${SDPO_TARGET_GUARD_MASK_PARSE_ERROR:-true} open_think=${SDPO_TARGET_GUARD_MASK_OPEN_THINK:-true} repetition=${SDPO_TARGET_GUARD_MASK_REPETITION:-true}"
 echo "SDPO memory: enabled=${SDPO_MEMORY_ENABLED:-false} mode=${SDPO_MEMORY_MODE:-relevant} inject_when=${SDPO_MEMORY_INJECT_WHEN:-no_solution} allow_without_feedback=${SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK:-false} path=${SDPO_MEMORY_PATH:-<unset>}"
+echo "Trainer resume: mode=${RESUME_MODE:-auto} from=${RESUME_FROM_PATH:-<auto/latest>}"
 echo "vLLM profile: $TAU3_VLLM_PROFILE"
 echo "VLLM_USE_V1: ${VLLM_USE_V1:-<unset>}"
 echo "vLLM prefix/chunked/max-batched/eager: ${VLLM_ENABLE_PREFIX_CACHING:-<config>}/${VLLM_ENABLE_CHUNKED_PREFILL:-<config>}/${VLLM_MAX_NUM_BATCHED_TOKENS:-<config>}/${VLLM_ENFORCE_EAGER:-<config>}"
