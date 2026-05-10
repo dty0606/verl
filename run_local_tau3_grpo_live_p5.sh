@@ -120,6 +120,7 @@ ARGS=(
     "actor_rollout_ref.actor.optim.lr_warmup_steps=${LR_WARMUP_STEPS:-0}"
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-8}"
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
+    "actor_rollout_ref.actor.freeze_vision_tower=${FREEZE_VISION_TOWER:-true}"
     "actor_rollout_ref.actor.policy_loss.loss_mode=vanilla"
     "actor_rollout_ref.rollout.n=${ROLLOUT_BATCH_SIZE:-8}"
     "actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP_SIZE:-1}"

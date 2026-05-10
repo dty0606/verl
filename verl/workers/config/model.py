@@ -83,6 +83,7 @@ class HFModelConfig(BaseConfig):
         "local_hf_config_path",
         "local_tokenizer_path",
         "mtp",
+        "freeze_vision_tower",
     }
 
     path: str = MISSING
@@ -137,6 +138,9 @@ class HFModelConfig(BaseConfig):
 
     use_fused_kernels: bool = False
     fused_kernel_options: dict = field(default_factory=dict)
+
+    # Freeze visual tower parameters for language-only training on VLM checkpoints.
+    freeze_vision_tower: bool = False
 
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})

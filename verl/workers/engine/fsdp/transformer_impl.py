@@ -113,6 +113,11 @@ def _raise_first_nonfinite_named_tensor(named_tensors, *, phase: str) -> None:
         )
 
 
+def _is_vision_tower_param_name(name: str) -> bool:
+    vision_markers = {"visual", "vision_model", "vision_tower", "vision_encoder"}
+    return bool(vision_markers.intersection(name.split(".")))
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -477,6 +482,31 @@ class FSDPEngine(BaseEngine):
 
         return optimizer
 
+    def _freeze_vision_tower_params(self, module):
+        if not bool(self.model_config.get("freeze_vision_tower", False)):
+            return
+
+        frozen_tensors = 0
+        frozen_elements = 0
+        for name, param in module.named_parameters():
+            if not _is_vision_tower_param_name(name):
+                continue
+            if param.requires_grad:
+                param.requires_grad_(False)
+            frozen_tensors += 1
+            frozen_elements += param.numel()
+
+        if self.rank == 0:
+            logger.info(
+                "Froze vision tower parameters for language-only training: tensors=%s elements=%s",
+                frozen_tensors,
+                frozen_elements,
+            )
+            print(
+                f"[freeze_vision_tower] tensors={frozen_tensors} elements={frozen_elements}",
+                flush=True,
+            )
+
     def _build_lr_scheduler(self, optimizer):
         from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
@@ -587,6 +617,7 @@ class FSDPEngine(BaseEngine):
         log_gpu_memory_usage("After FSDP", logger=None)
 
         if not self.engine_config.forward_only:
+            self._freeze_vision_tower_params(module)
             # Initialize optimizer with model parameters and config settings
             optimizer = self._build_optimizer(module)
             # Create learning rate scheduler with warmup and decay settings

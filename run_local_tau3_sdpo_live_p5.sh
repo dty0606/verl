@@ -140,6 +140,7 @@ ARGS=(
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
     "actor_rollout_ref.actor.use_dynamic_bsz=${ACTOR_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}}"
     "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-32768}}"
+    "actor_rollout_ref.actor.freeze_vision_tower=${FREEZE_VISION_TOWER:-true}"
     "actor_rollout_ref.actor.policy_loss.loss_mode=sdpo"
     "actor_rollout_ref.actor.policy_loss.sdpo_full_logit_distillation=${SDPO_FULL_LOGIT_DISTILLATION:-true}"
     "actor_rollout_ref.actor.policy_loss.sdpo_alpha=${SDPO_ALPHA:-0.5}"

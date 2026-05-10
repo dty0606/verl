@@ -92,6 +92,36 @@ The extracted P5 log was moved out of Git to:
 D:\AI_research\sdop\logs\20260509_205035_sdpo_nan_probe_v2_ema_false_positive\
 ```
 
+## 2026-05-10 Probe v3 Result
+
+Kiro's v3 rerun archived `west_p5_original_sdpo_r4k_b4n8_nan_probe_30step_v3`
+confirmed both earlier fixes:
+
+- the top-k placeholder-row invalid-mass failure did not reappear;
+- `bad_count=0` EMA finite-check false positives no longer stopped the run.
+
+The new first failure was a real actor-parameter corruption after the first
+actor update:
+
+```text
+RuntimeError: Non-finite actor parameter after SDPO EMA device/dtype transfer
+name=_fsdp_wrapped_module.model.visual.blocks.12._fsdp_wrapped_module._flat_param
+shape=(1574528,) bad_count=2 first_bad=[735396]
+```
+
+Tau3 airline runs are text-only but use a Qwen3.5 VLM checkpoint. The visual
+tower was still trainable, so unused visual parameters could receive RL
+gradients and become non-finite. The Tau3 GRPO/SDPO configs and P5 launchers
+now freeze the visual tower by default, and the FSDP engine honors
+`actor.freeze_vision_tower` by freezing visual/vision flat parameters after
+FSDP wrapping and before optimizer construction.
+
+The extracted P5 log was moved out of Git to:
+
+```text
+D:\AI_research\sdop\logs\20260509_212600_sdpo_nan_probe_v3_actor_visual_nan\
+```
+
 ## P5 Reproduction Recipe
 
 Use the direct SDPO launcher rather than relying on the capacity-matrix wrapper when debugging NaNs.

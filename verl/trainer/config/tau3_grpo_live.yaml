@@ -20,6 +20,9 @@ actor_rollout_ref:
     ppo_mini_batch_size: 12
     ppo_micro_batch_size_per_gpu: 1
     ppo_max_token_len_per_gpu: ${max_model_len}
+    # Tau3 airline is language-only. Keep Qwen3.5 VLM visual weights fixed so
+    # text-only RL updates cannot corrupt unused vision blocks.
+    freeze_vision_tower: True
     use_kl_loss: False
     policy_loss:
       loss_mode: vanilla

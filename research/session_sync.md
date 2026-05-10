@@ -750,6 +750,13 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - The new first failure was `Non-finite actor parameter after SDPO EMA device/dtype transfer ... visual.blocks.*._flat_param ... bad_count=0` inside `ema_update_module_params`. Since the concrete bad-entry count is zero, this is a finite-check false positive, not evidence of NaN/Inf actor or EMA parameters.
 - Finite-check helpers now raise only when they can count at least one non-finite entry. Real NaN/Inf corruption still fails fast with `bad_count`, `first_bad`, and finite min/max context.
 
+### 2026-05-10 SDPO NaN Probe v3
+
+- Pulled Kiro commit `0d12b596` and extracted `sdpo_nan_probe_v3_actor_visual_nan.tgz` to `D:\AI_research\sdop\logs\20260509_212600_sdpo_nan_probe_v3_actor_visual_nan\`; the archive was removed from Git after extraction.
+- Probe v3 confirmed both prior fixes: no placeholder-row `student_topk_log_probs` invalid-mass failure, and no `bad_count=0` EMA false-positive stop.
+- New first failure was real actor visual-tower corruption after the first update: `_fsdp_wrapped_module.model.visual.blocks.12._fsdp_wrapped_module._flat_param`, `bad_count=2`, `first_bad=[735396]`.
+- Root cause: Tau3 airline is language-only but the Qwen3.5 VLM visual tower was still trainable. The Tau3 GRPO/SDPO configs and P5 launchers now default `actor.freeze_vision_tower=true`, and the FSDP engine freezes visual/vision flat parameters after FSDP wrapping and before optimizer construction.
+
 ## Evidence Carried Forward
 
 From the old repo:
