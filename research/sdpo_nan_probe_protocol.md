@@ -180,6 +180,24 @@ index. If the source value is huge but finite and the target dtype is narrower,
 the immediate mechanism is cast overflow during EMA transfer; the upstream cause
 is still the SDPO actor update producing an unstable finite outlier.
 
+Probe v5 ruled out cast overflow. The first bad transferred index had a small
+finite CUDA fp32 source value and no large source outliers:
+
+```text
+source_value_at_first_bad=0.00010579199442872778
+source_dtype=torch.float32
+source_device=cuda:0
+source_abs_max=0.3827260434627533
+target_dtype=torch.float32
+target_device=cpu
+```
+
+The same float32 value became non-finite only after CUDA-to-CPU transfer. That
+points to an asynchronous transfer/offload/resharding race, not SDPO loss scale,
+not dtype narrowing, and not a huge actor weight. The EMA actor-to-teacher copy
+now uses a blocking transfer (`non_blocking=False`) and synchronizes before the
+finite check when fail-fast is enabled.
+
 ## P5 Reproduction Recipe
 
 Use the direct SDPO launcher rather than relying on the capacity-matrix wrapper when debugging NaNs.

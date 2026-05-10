@@ -332,8 +332,10 @@ def ema_update_module_params(
                 actor_data = actor_data.to(
                     device=teacher_param.device,
                     dtype=teacher_param.dtype,
-                    non_blocking=True,
+                    non_blocking=False,
                 )
+                if check_finite and torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 if check_finite:
                     _raise_if_ema_transfer_has_nonfinite(
                         actor_name,
