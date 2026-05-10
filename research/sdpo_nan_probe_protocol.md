@@ -118,10 +118,13 @@ FSDP wrapping and before optimizer construction.
 
 The follow-up hardening is layered rather than just hiding the check. In
 language-only Tau3, Qwen3.5 should not run the dummy no-image `model.visual(...)`
-branch, because `0.0 * image_embeds.mean()` can still propagate NaNs if the
-frozen visual tower is already non-finite. The actor optimizer and fail-fast
-checks also skip frozen/vision params, and SDPO EMA skips frozen/vision read/write
-while preserving finite checks for trainable language params.
+branch in either the actor or ref/EMA teacher, because `0.0 * image_embeds.mean()`
+can still propagate NaNs if the frozen visual tower is already non-finite. The
+actor optimizer and fail-fast checks also skip frozen/vision params, and SDPO EMA
+skips frozen/vision read/write while preserving finite checks for trainable
+language params. Optimizer construction fails loudly if filtering leaves no
+trainable parameters. W&B/local metrics surface skipped EMA tensors via
+`self_distillation/ema_teacher_skipped_vision_param_tensors_*`.
 
 The extracted P5 log was moved out of Git to:
 

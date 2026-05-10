@@ -499,6 +499,9 @@ class FSDPEngine(BaseEngine):
                 continue
             optimizer_params.append(param)
 
+        if not optimizer_params:
+            raise RuntimeError("No trainable parameters remain after frozen/vision optimizer filtering")
+
         if self.rank == 0 and (skipped_frozen_tensors or skipped_vision_tensors):
             logger.info(
                 "Optimizer excluded frozen/vision parameters: frozen_tensors=%s frozen_elements=%s "
@@ -525,6 +528,8 @@ class FSDPEngine(BaseEngine):
         skip_vision_tower = bool(self.model_config.get("freeze_vision_tower", False))
         for name, param in self.module.named_parameters():
             if skip_vision_tower and _is_vision_tower_param_name(name):
+                continue
+            if not param.requires_grad:
                 continue
             yield name, param
 

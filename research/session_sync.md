@@ -760,7 +760,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 ### 2026-05-10 SDPO VLM Text-Only Hardening
 
 - The initial visual freeze was necessary but shallow. Qwen3.5's patched no-image forward still ran a dummy zero-image `model.visual(...)` call and added `0.0 * image_embeds.mean()`, so frozen/non-finite visual weights could still poison text-only forwards (`0 * NaN` is NaN).
-- Hardened the text-only path so `freeze_vision_tower=true` marks the HF config, skips the dummy no-image Qwen3.5 visual forward, excludes frozen/vision params from actor optimizer groups and actor fail-fast finite checks, and skips frozen/vision params during SDPO EMA read/write.
+- Hardened the text-only path so `freeze_vision_tower=true` marks both actor and ref/EMA HF configs, skips the dummy no-image Qwen3.5 visual forward, excludes frozen/vision params from actor optimizer groups and actor fail-fast finite checks, and skips frozen/vision params during SDPO EMA read/write. Optimizer construction now fails loudly if filtering leaves no trainable params, and EMA skip counts are surfaced in `self_distillation/ema_teacher_skipped_vision_param_tensors_*`.
 - Important safety line: this does **not** disable finite checks for trainable language params. It only treats VLM vision weights as inert for Tau3 airline, matching the `vLLM_LANGUAGE_MODEL_ONLY=true` rollout setting.
 
 ## Evidence Carried Forward

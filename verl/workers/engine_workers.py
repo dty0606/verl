@@ -808,6 +808,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
             ref_config.model_config.mtp = MtpConfig(enable=False)
+            ref_config.model_config.freeze_vision_tower = bool(self.config.actor.get("freeze_vision_tower", False))
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(

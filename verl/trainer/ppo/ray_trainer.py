@@ -1483,7 +1483,15 @@ class RayPPOTrainer:
         if isinstance(worker_metrics, dict):
             worker_metrics = [worker_metrics]
         if isinstance(worker_metrics, list):
-            for key in ("param_tensors", "param_elements", "device_transfer_tensors"):
+            for key in (
+                "param_tensors",
+                "param_elements",
+                "device_transfer_tensors",
+                "skipped_param_tensors",
+                "skipped_param_elements",
+                "skipped_vision_param_tensors",
+                "skipped_vision_param_elements",
+            ):
                 values = [
                     float(item.get(key, 0.0))
                     for item in worker_metrics
