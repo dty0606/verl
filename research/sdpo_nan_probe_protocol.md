@@ -66,6 +66,32 @@ path now derives the no-padding response-prediction-position mask, validates
 top-k IDs only on those positions, and replaces non-response rows with a finite
 degenerate distribution before JSD/tail computation.
 
+## 2026-05-10 Probe v2 Result
+
+Kiro's v2 rerun archived `west_p5_original_sdpo_r4k_b4n8_nan_probe_30step_v2`
+confirmed the response-prediction placeholder fix: the previous
+`student_topk_log_probs` invalid-mass failure did not reappear.
+
+The new first failure was in the EMA finite checker before step 1 completed:
+
+```text
+RuntimeError: Non-finite actor parameter after SDPO EMA device/dtype transfer
+name=_fsdp_wrapped_module.model.visual.blocks.*._fsdp_wrapped_module._flat_param
+shape=(1574528,) bad_count=0
+```
+
+Because `bad_count=0`, the checker did not identify any concrete NaN/Inf entry.
+This is treated as an FSDP/flat-parameter diagnostic false positive, not model
+corruption. Finite-check helpers now raise only when a concrete bad-entry count
+is positive, while still reporting `first_bad`, `finite_min`, and `finite_max`
+for real failures.
+
+The extracted P5 log was moved out of Git to:
+
+```text
+D:\AI_research\sdop\logs\20260509_205035_sdpo_nan_probe_v2_ema_false_positive\
+```
+
 ## P5 Reproduction Recipe
 
 Use the direct SDPO launcher rather than relying on the capacity-matrix wrapper when debugging NaNs.

@@ -743,6 +743,13 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Completed-step CUDA metrics show actor-student top-k was the largest SDPO logprob phase: step 4 reached `student_peak=31.01 GiB`, `teacher_peak=27.23 GiB` with `response_length/max=5296`. Step 8's `response_mask_max=23679` is far larger and was not W&B-committed as a completed training row.
 - Correct next safe test: bypass `p5_run_vllm_v1_capacity_matrix.sh` or add an env-driven custom profile. Use `run_local_tau3_sdpo_live_p5.sh` directly with `MAX_PROMPT_LENGTH=8192`, `MAX_RESPONSE_LENGTH=8192`, `SDPO_MAX_REPROMPT_LEN=4096`, `MAX_MODEL_LEN=16384`, logprob microbatch size 1, diagnostics enabled, and NVME paths for logs/checkpoints/Ray/W&B.
 
+### 2026-05-10 SDPO NaN Probe v2
+
+- Pulled Kiro commit `6da5add8` and extracted `sdpo_nan_probe_v2_ema_false_positive.tgz` to `D:\AI_research\sdop\logs\20260509_205035_sdpo_nan_probe_v2_ema_false_positive\`; the archive was removed from Git after extraction.
+- Probe v2 did **not** reproduce the earlier placeholder-row `student_topk_log_probs` invalid-mass failure, so the response-prediction mask/safe placeholder fix is working for this rerun.
+- The new first failure was `Non-finite actor parameter after SDPO EMA device/dtype transfer ... visual.blocks.*._flat_param ... bad_count=0` inside `ema_update_module_params`. Since the concrete bad-entry count is zero, this is a finite-check false positive, not evidence of NaN/Inf actor or EMA parameters.
+- Finite-check helpers now raise only when they can count at least one non-finite entry. Real NaN/Inf corruption still fails fast with `bad_count`, `first_bad`, and finite min/max context.
+
 ## Evidence Carried Forward
 
 From the old repo:

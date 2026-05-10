@@ -1412,10 +1412,11 @@ class RayPPOTrainer:
         metrics = tu.get(output, "metrics") or {}
         topk_log_probs = no_padding_2_padding(topk_log_probs, batch_td).float()
         topk_ids = no_padding_2_padding(topk_ids, batch_td).to(torch.long)
-        if not bool(torch.isfinite(topk_log_probs).all().item()):
-            finite_mask = torch.isfinite(topk_log_probs)
-            bad_count = int((~finite_mask).sum().item())
-            first_bad = (~finite_mask).nonzero(as_tuple=False)[0].detach().cpu().tolist()
+        finite_mask = torch.isfinite(topk_log_probs)
+        bad_mask = ~finite_mask
+        bad_count = int(bad_mask.sum().item())
+        if bad_count > 0:
+            first_bad = bad_mask.nonzero(as_tuple=False)[0].detach().cpu().tolist()
             finite_values = topk_log_probs[finite_mask]
             finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
             finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")

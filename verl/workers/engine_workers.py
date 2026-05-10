@@ -73,6 +73,28 @@ def _sdpo_ema_finite_check_enabled() -> bool:
     return _env_flag("SDPO_EMA_FINITE_CHECK") or _env_flag("SDPO_FAIL_FAST_NONFINITE")
 
 
+def _raise_if_tensor_has_nonfinite(label: str, name: str, tensor: torch.Tensor) -> None:
+    """Raise only when we can identify concrete NaN/Inf entries.
+
+    Some sharded/flattened FSDP parameters can make a coarse all-finite check
+    report false while a concrete bad-entry count is zero. Treat that as a
+    diagnostic false positive; real corruption must have at least one bad item.
+    """
+    finite_mask = torch.isfinite(tensor)
+    bad_mask = ~finite_mask
+    bad_count = int(bad_mask.sum().item())
+    if bad_count <= 0:
+        return
+    first_bad = bad_mask.nonzero(as_tuple=False)[0].detach().cpu().tolist()
+    finite_values = tensor[finite_mask]
+    finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
+    finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")
+    raise RuntimeError(
+        f"{label} name={name} shape={tuple(tensor.shape)} "
+        f"bad_count={bad_count} first_bad={first_bad} finite_min={finite_min} finite_max={finite_max}"
+    )
+
+
 def _gib(num_bytes: int | float) -> float:
     return float(num_bytes) / (1024**3)
 
@@ -205,18 +227,16 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
                 continue
             actor_data = actor_param.data.detach()
             if check_finite:
-                if not bool(torch.isfinite(actor_data).all().item()):
-                    bad_count = int((~torch.isfinite(actor_data)).sum().item())
-                    raise RuntimeError(
-                        "Non-finite actor parameter before SDPO EMA update "
-                        f"name={actor_name} shape={tuple(actor_data.shape)} bad_count={bad_count}"
-                    )
-                if not bool(torch.isfinite(teacher_param.data).all().item()):
-                    bad_count = int((~torch.isfinite(teacher_param.data)).sum().item())
-                    raise RuntimeError(
-                        "Non-finite teacher parameter before SDPO EMA update "
-                        f"name={teacher_name} shape={tuple(teacher_param.shape)} bad_count={bad_count}"
-                    )
+                _raise_if_tensor_has_nonfinite(
+                    "Non-finite actor parameter before SDPO EMA update",
+                    actor_name,
+                    actor_data,
+                )
+                _raise_if_tensor_has_nonfinite(
+                    "Non-finite teacher parameter before SDPO EMA update",
+                    teacher_name,
+                    teacher_param.data,
+                )
             if actor_data.device != teacher_param.device or actor_data.dtype != teacher_param.dtype:
                 device_transfer_tensors += 1
                 actor_data = actor_data.to(
@@ -224,18 +244,18 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
                     dtype=teacher_param.dtype,
                     non_blocking=True,
                 )
-                if check_finite and not bool(torch.isfinite(actor_data).all().item()):
-                    bad_count = int((~torch.isfinite(actor_data)).sum().item())
-                    raise RuntimeError(
-                        "Non-finite actor parameter after SDPO EMA device/dtype transfer "
-                        f"name={actor_name} shape={tuple(actor_data.shape)} bad_count={bad_count}"
+                if check_finite:
+                    _raise_if_tensor_has_nonfinite(
+                        "Non-finite actor parameter after SDPO EMA device/dtype transfer",
+                        actor_name,
+                        actor_data,
                     )
             teacher_param.data.mul_(1.0 - update_rate).add_(actor_data, alpha=update_rate)
-            if check_finite and not bool(torch.isfinite(teacher_param.data).all().item()):
-                bad_count = int((~torch.isfinite(teacher_param.data)).sum().item())
-                raise RuntimeError(
-                    "Non-finite teacher parameter after SDPO EMA update "
-                    f"name={teacher_name} shape={tuple(teacher_param.shape)} bad_count={bad_count}"
+            if check_finite:
+                _raise_if_tensor_has_nonfinite(
+                    "Non-finite teacher parameter after SDPO EMA update",
+                    teacher_name,
+                    teacher_param.data,
                 )
             param_tensors += 1
             param_elements += teacher_param.numel()

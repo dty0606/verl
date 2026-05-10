@@ -51,6 +51,19 @@ def test_ema_update_module_params_moves_teacher_toward_actor():
     assert torch.allclose(teacher.weight, torch.full_like(teacher.weight, 0.25))
 
 
+def test_ema_update_finite_check_rejects_real_nonfinite_actor_param(monkeypatch):
+    monkeypatch.setenv("SDPO_EMA_FINITE_CHECK", "1")
+    teacher = torch.nn.Linear(2, 1, bias=False)
+    actor = torch.nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        teacher.weight.fill_(0.0)
+        actor.weight.fill_(1.0)
+        actor.weight[0, 0] = float("nan")
+
+    with pytest.raises(RuntimeError, match="bad_count=1"):
+        ema_update_module_params(teacher, actor, update_rate=0.25)
+
+
 def test_ema_update_module_params_handles_cpu_actor_cuda_teacher():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to reproduce actor/teacher device mismatch")

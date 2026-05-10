@@ -42,11 +42,12 @@ def _sdpo_fail_fast_nonfinite_enabled() -> bool:
 
 
 def _raise_if_nonfinite_tensor(name: str, tensor: torch.Tensor) -> None:
-    if bool(torch.isfinite(tensor).all().item()):
-        return
     finite_mask = torch.isfinite(tensor)
-    bad_count = int((~finite_mask).sum().item())
-    first_bad = (~finite_mask).nonzero(as_tuple=False)[0].detach().cpu().tolist()
+    bad_mask = ~finite_mask
+    bad_count = int(bad_mask.sum().item())
+    if bad_count <= 0:
+        return
+    first_bad = bad_mask.nonzero(as_tuple=False)[0].detach().cpu().tolist()
     finite_values = tensor[finite_mask]
     finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
     finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")

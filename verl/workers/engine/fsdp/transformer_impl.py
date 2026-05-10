@@ -97,11 +97,12 @@ def _raise_first_nonfinite_named_tensor(named_tensors, *, phase: str) -> None:
     for name, tensor in named_tensors:
         if tensor is None or not tensor.is_floating_point():
             continue
-        if bool(torch.isfinite(tensor).all().item()):
-            continue
         finite_mask = torch.isfinite(tensor)
-        bad_count = int((~finite_mask).sum().item())
-        first_bad = (~finite_mask).nonzero(as_tuple=False)[0].detach().cpu().tolist()
+        bad_mask = ~finite_mask
+        bad_count = int(bad_mask.sum().item())
+        if bad_count <= 0:
+            continue
+        first_bad = bad_mask.nonzero(as_tuple=False)[0].detach().cpu().tolist()
         finite_values = tensor[finite_mask]
         finite_min = float(finite_values.min().item()) if finite_values.numel() else float("nan")
         finite_max = float(finite_values.max().item()) if finite_values.numel() else float("nan")
