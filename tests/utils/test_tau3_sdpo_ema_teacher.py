@@ -64,6 +64,91 @@ def test_ema_update_finite_check_rejects_real_nonfinite_actor_param(monkeypatch)
         ema_update_module_params(teacher, actor, update_rate=0.25)
 
 
+def test_ema_update_skips_vision_tower_params_even_if_nonfinite(monkeypatch):
+    monkeypatch.setenv("SDPO_EMA_FINITE_CHECK", "1")
+
+    class ToyVLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language = torch.nn.Linear(2, 1, bias=False)
+            self.visual = torch.nn.Linear(2, 1, bias=False)
+
+    teacher = ToyVLM()
+    actor = ToyVLM()
+    with torch.no_grad():
+        teacher.language.weight.fill_(0.0)
+        teacher.visual.weight.fill_(0.0)
+        actor.language.weight.fill_(1.0)
+        actor.visual.weight.fill_(1.0)
+        actor.visual.weight[0, 0] = float("nan")
+
+    metrics = ema_update_module_params(
+        teacher,
+        actor,
+        update_rate=0.25,
+        skip_frozen_params=True,
+        skip_vision_tower=True,
+    )
+
+    assert metrics["param_tensors"] == 1
+    assert metrics["skipped_vision_param_tensors"] == 1
+    assert torch.allclose(teacher.language.weight, torch.full_like(teacher.language.weight, 0.25))
+    assert torch.allclose(teacher.visual.weight, torch.zeros_like(teacher.visual.weight))
+
+
+def test_ema_update_still_rejects_nonfinite_language_param_when_skipping_vision(monkeypatch):
+    monkeypatch.setenv("SDPO_EMA_FINITE_CHECK", "1")
+
+    class ToyVLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language = torch.nn.Linear(2, 1, bias=False)
+            self.visual = torch.nn.Linear(2, 1, bias=False)
+
+    teacher = ToyVLM()
+    actor = ToyVLM()
+    with torch.no_grad():
+        actor.language.weight[0, 0] = float("nan")
+
+    with pytest.raises(RuntimeError, match="language.weight.*bad_count=1"):
+        ema_update_module_params(
+            teacher,
+            actor,
+            update_rate=0.25,
+            skip_frozen_params=True,
+            skip_vision_tower=True,
+        )
+
+
+def test_qwen35_text_only_freeze_skips_dummy_visual_forward():
+    pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+    from verl.models.transformers.qwen3_5 import _get_input_embeds
+
+    class VisualShouldNotRun(torch.nn.Module):
+        dtype = torch.float32
+
+        def forward(self, *args, **kwargs):
+            raise AssertionError("dummy visual forward should be skipped when freeze_vision_tower=True")
+
+    class FakeQwen35(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(freeze_vision_tower=True)
+            self.embed = torch.nn.Embedding(8, 4)
+            self.visual = VisualShouldNotRun()
+
+        def get_input_embeddings(self):
+            return self.embed
+
+    model = FakeQwen35()
+    input_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
+
+    output = _get_input_embeds(model, input_ids)
+
+    assert output["inputs_embeds"].shape == (1, 3, 4)
+    assert output["attention_mask"] is None
+
+
 def test_ema_update_module_params_handles_cpu_actor_cuda_teacher():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to reproduce actor/teacher device mismatch")

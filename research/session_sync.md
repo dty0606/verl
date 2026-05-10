@@ -757,6 +757,12 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - New first failure was real actor visual-tower corruption after the first update: `_fsdp_wrapped_module.model.visual.blocks.12._fsdp_wrapped_module._flat_param`, `bad_count=2`, `first_bad=[735396]`.
 - Root cause: Tau3 airline is language-only but the Qwen3.5 VLM visual tower was still trainable. The Tau3 GRPO/SDPO configs and P5 launchers now default `actor.freeze_vision_tower=true`, and the FSDP engine freezes visual/vision flat parameters after FSDP wrapping and before optimizer construction.
 
+### 2026-05-10 SDPO VLM Text-Only Hardening
+
+- The initial visual freeze was necessary but shallow. Qwen3.5's patched no-image forward still ran a dummy zero-image `model.visual(...)` call and added `0.0 * image_embeds.mean()`, so frozen/non-finite visual weights could still poison text-only forwards (`0 * NaN` is NaN).
+- Hardened the text-only path so `freeze_vision_tower=true` marks the HF config, skips the dummy no-image Qwen3.5 visual forward, excludes frozen/vision params from actor optimizer groups and actor fail-fast finite checks, and skips frozen/vision params during SDPO EMA read/write.
+- Important safety line: this does **not** disable finite checks for trainable language params. It only treats VLM vision weights as inert for Tau3 airline, matching the `vLLM_LANGUAGE_MODEL_ONLY=true` rollout setting.
+
 ## Evidence Carried Forward
 
 From the old repo:

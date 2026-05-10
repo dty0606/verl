@@ -73,6 +73,11 @@ def _sdpo_ema_finite_check_enabled() -> bool:
     return _env_flag("SDPO_EMA_FINITE_CHECK") or _env_flag("SDPO_FAIL_FAST_NONFINITE")
 
 
+def _is_vision_tower_param_name(name: str) -> bool:
+    vision_markers = {"visual", "vision_model", "vision_tower", "vision_encoder"}
+    return bool(vision_markers.intersection(name.split(".")))
+
+
 def _raise_if_tensor_has_nonfinite(label: str, name: str, tensor: torch.Tensor) -> None:
     """Raise only when we can identify concrete NaN/Inf entries.
 
@@ -191,7 +196,14 @@ def _attach_sdpo_cuda_memory_metrics(output: TensorDict | None, metrics: dict[st
     return output
 
 
-def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torch.nn.Module, update_rate: float) -> dict:
+def ema_update_module_params(
+    teacher_module: torch.nn.Module,
+    actor_module: torch.nn.Module,
+    update_rate: float,
+    *,
+    skip_frozen_params: bool = False,
+    skip_vision_tower: bool = False,
+) -> dict:
     """In-place EMA update for two same-shaped modules."""
     update_rate = float(update_rate)
     check_finite = _sdpo_ema_finite_check_enabled()
@@ -202,6 +214,10 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
             "param_tensors": 0,
             "param_elements": 0,
             "device_transfer_tensors": 0,
+            "skipped_param_tensors": 0,
+            "skipped_param_elements": 0,
+            "skipped_vision_param_tensors": 0,
+            "skipped_vision_param_elements": 0,
         }
     if update_rate > 1.0:
         raise ValueError(f"EMA update_rate must be <= 1.0, got {update_rate}")
@@ -214,6 +230,10 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
     param_tensors = 0
     param_elements = 0
     device_transfer_tensors = 0
+    skipped_param_tensors = 0
+    skipped_param_elements = 0
+    skipped_vision_param_tensors = 0
+    skipped_vision_param_elements = 0
     with torch.no_grad():
         for (teacher_name, teacher_param), (actor_name, actor_param) in zip(teacher_params, actor_params):
             if teacher_name != actor_name:
@@ -225,6 +245,22 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
                 )
             if not teacher_param.is_floating_point():
                 continue
+            skip_param = False
+            skip_vision_param = False
+            if skip_vision_tower and _is_vision_tower_param_name(actor_name):
+                skip_param = True
+                skip_vision_param = True
+            elif skip_frozen_params and not actor_param.requires_grad:
+                skip_param = True
+
+            if skip_param:
+                skipped_param_tensors += 1
+                skipped_param_elements += teacher_param.numel()
+                if skip_vision_param:
+                    skipped_vision_param_tensors += 1
+                    skipped_vision_param_elements += teacher_param.numel()
+                continue
+
             actor_data = actor_param.data.detach()
             if check_finite:
                 _raise_if_tensor_has_nonfinite(
@@ -266,6 +302,10 @@ def ema_update_module_params(teacher_module: torch.nn.Module, actor_module: torc
         "param_tensors": param_tensors,
         "param_elements": param_elements,
         "device_transfer_tensors": device_transfer_tensors,
+        "skipped_param_tensors": skipped_param_tensors,
+        "skipped_param_elements": skipped_param_elements,
+        "skipped_vision_param_tensors": skipped_vision_param_tensors,
+        "skipped_vision_param_elements": skipped_vision_param_elements,
     }
 
 
@@ -969,7 +1009,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 f"(actor={type(self.actor.engine).__name__}, ref={type(self.ref.engine).__name__})."
             )
 
-        metrics = ema_update_module_params(teacher_module, actor_module, update_rate)
+        skip_vision_tower = bool(self.config.actor.get("freeze_vision_tower", False))
+        metrics = ema_update_module_params(
+            teacher_module,
+            actor_module,
+            update_rate,
+            skip_frozen_params=True,
+            skip_vision_tower=skip_vision_tower,
+        )
         if self.ref.engine.is_param_offload_enabled:
             self.ref.engine.to(device="cpu", model=True, optimizer=False, grad=False)
         aggressive_empty_cache(force_sync=True)

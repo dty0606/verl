@@ -116,6 +116,13 @@ now freeze the visual tower by default, and the FSDP engine honors
 `actor.freeze_vision_tower` by freezing visual/vision flat parameters after
 FSDP wrapping and before optimizer construction.
 
+The follow-up hardening is layered rather than just hiding the check. In
+language-only Tau3, Qwen3.5 should not run the dummy no-image `model.visual(...)`
+branch, because `0.0 * image_embeds.mean()` can still propagate NaNs if the
+frozen visual tower is already non-finite. The actor optimizer and fail-fast
+checks also skip frozen/vision params, and SDPO EMA skips frozen/vision read/write
+while preserving finite checks for trainable language params.
+
 The extracted P5 log was moved out of Git to:
 
 ```text

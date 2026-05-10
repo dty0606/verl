@@ -260,6 +260,8 @@ class FSDPEngine(BaseEngine):
         from verl.utils.torch_dtypes import PrecisionType
 
         torch_dtype = self.engine_config.model_dtype
+        freeze_vision_tower = bool(self.model_config.get("freeze_vision_tower", False))
+        setattr(self.model_config.hf_config, "freeze_vision_tower", freeze_vision_tower)
 
         if torch_dtype is None:
             # if it is training, we force torch_dtype to fp32
@@ -299,6 +301,8 @@ class FSDPEngine(BaseEngine):
                     model_config=self.model_config.hf_config,
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
+
+            setattr(module.config, "freeze_vision_tower", freeze_vision_tower)
 
             use_liger = self.model_config.use_liger
             # Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with verl's forward patching)
@@ -478,9 +482,51 @@ class FSDPEngine(BaseEngine):
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
-        optimizer = build_optimizer(module.parameters(), self.optimizer_config)
+        optimizer_params = []
+        skipped_frozen_tensors = 0
+        skipped_frozen_elements = 0
+        skipped_vision_tensors = 0
+        skipped_vision_elements = 0
+        skip_vision_tower = bool(self.model_config.get("freeze_vision_tower", False))
+        for name, param in module.named_parameters():
+            if skip_vision_tower and _is_vision_tower_param_name(name):
+                skipped_vision_tensors += 1
+                skipped_vision_elements += param.numel()
+                continue
+            if not param.requires_grad:
+                skipped_frozen_tensors += 1
+                skipped_frozen_elements += param.numel()
+                continue
+            optimizer_params.append(param)
+
+        if self.rank == 0 and (skipped_frozen_tensors or skipped_vision_tensors):
+            logger.info(
+                "Optimizer excluded frozen/vision parameters: frozen_tensors=%s frozen_elements=%s "
+                "vision_tensors=%s vision_elements=%s trainable_tensors=%s",
+                skipped_frozen_tensors,
+                skipped_frozen_elements,
+                skipped_vision_tensors,
+                skipped_vision_elements,
+                len(optimizer_params),
+            )
+            print(
+                "[freeze_vision_tower] optimizer_excluded "
+                f"frozen_tensors={skipped_frozen_tensors} frozen_elements={skipped_frozen_elements} "
+                f"vision_tensors={skipped_vision_tensors} vision_elements={skipped_vision_elements} "
+                f"trainable_tensors={len(optimizer_params)}",
+                flush=True,
+            )
+
+        optimizer = build_optimizer(optimizer_params, self.optimizer_config)
 
         return optimizer
+
+    def _named_parameters_for_finite_check(self):
+        skip_vision_tower = bool(self.model_config.get("freeze_vision_tower", False))
+        for name, param in self.module.named_parameters():
+            if skip_vision_tower and _is_vision_tower_param_name(name):
+                continue
+            yield name, param
 
     def _freeze_vision_tower_params(self, module):
         if not bool(self.model_config.get("freeze_vision_tower", False)):
@@ -734,7 +780,7 @@ class FSDPEngine(BaseEngine):
 
         if _sdpo_fail_fast_nonfinite_enabled():
             _raise_first_nonfinite_named_tensor(
-                ((name, param.grad) for name, param in self.module.named_parameters()),
+                ((name, param.grad) for name, param in self._named_parameters_for_finite_check()),
                 phase="actor gradient before optimizer step",
             )
 
@@ -767,7 +813,7 @@ class FSDPEngine(BaseEngine):
 
         if _sdpo_fail_fast_nonfinite_enabled():
             _raise_first_nonfinite_named_tensor(
-                self.module.named_parameters(),
+                self._named_parameters_for_finite_check(),
                 phase="actor parameter after optimizer step",
             )
 
