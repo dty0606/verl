@@ -47,6 +47,26 @@ verl is fast with:
 
 </p>
 
+## Tau3 SDPO Research Branch Map
+
+This fork is being used for Tau3 multi-turn tool-agent post-training research. Keep the method branches separate so baseline, T3 truncation, and Note-SDPO results remain independently ablatable.
+
+| Branch | Purpose | What belongs here | What should not go here |
+|---|---|---|---|
+| `codex/guarded-tau3-sdpo-baseline` | Stable faithful Tau3 GRPO/SDPO baseline. | Original SDPO/GRPO runs, P5 launch recipes, resume safety, target guards, NaN/OOM diagnostics, and bug fixes needed to keep faithful SDPO healthy. | New method changes that alter rollout semantics or teacher context, unless they are default-off infrastructure. |
+| `codex/t3-rollout-truncation-adapter` | T3-style rollout-time tail truncation. | Default-off Tau3 T3 adapter, no-progress/tail detection, truncation metrics, and T3-only ablations against the baseline. | Note-bank retrieval, teacher-side historical notes, or changes that make T3 inseparable from Note-SDPO. |
+| `codex/note-sdpo-decision-hindsight` | Note-SDPO / teacher-side decision hindsight. | Train-only note bank, note retrieval, decision-sufficiency schema, teacher-quality probes, and relevant-note vs random-note vs raw-trajectory controls. | Rollout-time T3 truncation changes, except in a later combined branch after each method works alone. |
+| Future combined branch | Interaction study after individual validation. | Note-SDPO + T3 joint ablations once both isolated branches have clean baselines. | First-pass debugging of either method. |
+
+Run stems and output folders should mirror the method arm, for example:
+
+```text
+original_sdpo_*
+t3_sdpo_*
+note_sdpo_*
+note_t3_sdpo_*
+```
+
 ## News
 
 - [2026/04] verl's Megatron backend LoRA and router replay support is showcased at [PyTorch Conference Europe 2026](https://pytorchconferenceeu2026.sched.com/event/2Juce/optimizing-reinforcement-learning-at-trillion-parameter-scale-songlin-jiang-aalto-university-mind-lab).
