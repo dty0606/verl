@@ -1,6 +1,14 @@
 # Project: latest-VERL tau3 GRPO/SDPO fork
 
-Last Updated: 2026-05-09
+Last Updated: 2026-05-10
+
+### 2026-05-10 Note-SDPO decision hindsight branch
+
+- Created branch `codex/note-sdpo-decision-hindsight` from the guarded SDPO baseline and pushed it to the private remote.
+- Added the first Note-SDPO scaffold: strict teacher-written decision-note bank builder, audited train-active memory retrieval, expanded teacher-probe prompt arms, and disabled-by-default decision/action-span shadow metrics.
+- Note cards are teacher-side only and require `split=train`, `status=active`, `unit_type=teacher_written_decision_note`, and `leakage_audit.passed=true`; live retrieval now also blocks same UID/task metadata when available.
+- Decision weighting remains shadow-only by default. `apply_to_loss` is ignored while `shadow_mode=true`; do not enable loss weighting until span QC proves it does not reward short unsolved answers.
+- Added Kiro execution handoff at `research/kiro_note_sdpo_handoff.md`. Next milestone is an offline teacher-quality probe, not a full training claim.
 
 ### 2026-05-09 SDPO NaN fail-fast diagnostics
 
