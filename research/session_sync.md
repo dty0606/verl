@@ -817,3 +817,11 @@ From the old repo:
 - Mark old-repo numbers as historical unless re-run in this latest-VERL fork.
 - SFT, GRPO, and SDPO results are comparable only if they run end-to-end in this fork or in a single pinned latest-VERL remote clone.
 - Keep generated outputs out of `research/` unless they are concise summaries or plans.
+
+### 2026-05-12 Clean SDPO 6K rerun decision
+
+- Six-agent QC downgraded the old original-SDPO r4k/b4n8 overnight checkpoints to diagnostic-only evidence: the first ~180 steps used the pre-fix selected-mask/top-k placeholder path, and the eval rollouts show heavy clipping/context/tool-call failure modes.
+- Current guarded SDPO code has no known STOP-class implementation blocker for a clean rerun from the SFT base. It remains a guarded Tau3 adaptation of original SDPO because target guards are enabled.
+- The next P5 run should use the direct launcher, not the capacity-matrix wrapper, with Sonnet 4.6 user simulation, `MAX_RESPONSE_LENGTH=6144`, `MAX_MODEL_LEN=14336`, `TRAIN_BATCH_SIZE=4`, `PPO_MINI_BATCH_SIZE=4`, `ROLLOUT_BATCH_SIZE=8`, EMA teacher, memory disabled, fail-fast finite checks, and rollout data saving.
+- First run is a 30-step gate. If clean, rerun the same recipe to 300 steps. If it OOMs before step 30, fall back to the 4K/12K cap rather than adding more engineering in this baseline branch.
+- Do not rerun GRPO yet. Existing GRPO step270 remains the best-current reference, but a true apple-to-apple GRPO rerun should only happen after clean SDPO shows enough signal to justify a matched constrained comparison.
