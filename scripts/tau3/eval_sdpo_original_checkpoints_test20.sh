@@ -229,7 +229,7 @@ for STEP in "${STEP_ARRAY[@]}"; do
     # context-length / malformed-tool-format runs before we aggregate.
     if [ -f "scripts/tau3/audit_tau3_eval_artifact.py" ]; then
         python3 scripts/tau3/audit_tau3_eval_artifact.py \
-            --run-dir "outputs/eval_paired/$RUN_NAME" \
+            "outputs/eval_paired/$RUN_NAME" \
             > "outputs/eval_paired/$RUN_NAME/audit.log" 2>&1 || true
         echo "[step $STEP] audit log → outputs/eval_paired/$RUN_NAME/audit.log"
     fi
