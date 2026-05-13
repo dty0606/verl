@@ -562,7 +562,7 @@ def default_tau3_output_dir() -> Path:
 
 
 def tau3_runtime_mode(value: str | None = None) -> str:
-    mode = (value or os.environ.get("TAU3_LIVE_RUNTIME", "proxy_legacy")).strip().lower()
+    mode = (value or os.environ.get("TAU3_LIVE_RUNTIME", "official_gym")).strip().lower()
     if mode in {"gym", "official", "official_gym", "agent_gym", "agentgym"}:
         return "official_gym"
     if mode in {"proxy", "legacy", "proxy_legacy", "custom"}:

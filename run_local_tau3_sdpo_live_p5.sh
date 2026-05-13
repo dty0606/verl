@@ -2,10 +2,8 @@
 # SDPO baseline for tau3 live on latest VERL.
 #
 # SDPO_ARM controls the teacher-context variant:
-#   original      -> paper-style hybrid: successful peer if available,
-#                    otherwise failed-sample environment feedback
-#   vanilla_peer  -> diagnostic successful-peer-only teacher, no env feedback
-#   feedback_only -> diagnostic failed-sample feedback-only teacher, no peer solution
+#   peer_only -> faithful/minimal Tau3 SDPO: successful peer only, no
+#                heuristic environment-feedback injection and no memory cards.
 #
 # Usage:
 #   ./run_local_tau3_sdpo_live_p5.sh <task_path> [experiment_name_suffix] [feedback_mode]
@@ -19,16 +17,8 @@ fi
 
 TASK_INPUT="$1"
 SUFFIX="${2:-tau3_sdpo_baseline}"
-FEEDBACK_MODE="${3:-json}"
-
-case "$FEEDBACK_MODE" in
-    structured|json) FEEDBACK_MODE="json" ;;
-    text|plain|plain_text) FEEDBACK_MODE="plain_text" ;;
-    *) echo "Error: feedback_mode must be json or plain_text"; exit 1 ;;
-esac
 
 export TAU3_LIVE_RUNTIME="${TAU3_LIVE_RUNTIME:-official_gym}"
-export TAU3_LIVE_FEEDBACK_FORMAT="$FEEDBACK_MODE"
 export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION="${TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION:-0}"
 export TAU3_BEDROCK_MAX_RETRIES="${TAU3_BEDROCK_MAX_RETRIES:-3}"
 export TAU3_BEDROCK_RETRY_DELAYS="${TAU3_BEDROCK_RETRY_DELAYS:-15,30,60}"
@@ -44,9 +34,6 @@ export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 export USER="${USER:-$(whoami)}"
 export SDPO_OUTPUT_ROOT="${SDPO_OUTPUT_ROOT:-$PROJECT_ROOT/output/SDPO}"
 export SDPO_CHECKPOINT_ROOT="${SDPO_CHECKPOINT_ROOT:-$PROJECT_ROOT/checkpoints/SDPO}"
-if [ -n "${SDPO_MEMORY_PATH:-}" ] && [[ "$SDPO_MEMORY_PATH" != /* ]]; then
-    export SDPO_MEMORY_PATH="$PROJECT_ROOT/${SDPO_MEMORY_PATH#./}"
-fi
 
 if [ -z "${TAU3_LIVE_USER_MODEL:-}" ]; then
     echo "Error: TAU3_LIVE_USER_MODEL must be set."
@@ -84,13 +71,38 @@ compact_model_name() {
 }
 
 MODEL_NAME=$(compact_model_name "$MODEL_PATH" | tr -cs '[:alnum:]_.-' '-' | sed -E 's/^-+|-+$//g; s/-{2,}/-/g')
-SDPO_ARM="${SDPO_ARM:-original}"
+SDPO_ARM="${SDPO_ARM:-peer_only}"
 case "$SDPO_ARM" in
-    original|paper|paper_hybrid|hybrid|vanilla|vanilla_sdpo) SDPO_ARM="original" ;;
-    vanilla_peer|peer|successful_peer) SDPO_ARM="vanilla_peer" ;;
-    feedback|feedback_only|ff_sdpo) SDPO_ARM="feedback_only" ;;
-    *) echo "Error: SDPO_ARM must be original, vanilla_peer, or feedback_only"; exit 1 ;;
+    peer_only|faithful|minimal|vanilla_peer|peer|successful_peer) SDPO_ARM="peer_only" ;;
+    original|paper|paper_hybrid|hybrid|feedback_hybrid|feedback|feedback_only|ff_sdpo|vanilla|vanilla_sdpo)
+        echo "Error: SDPO_ARM=$SDPO_ARM is not supported by the guarded faithful baseline."
+        echo "Use SDPO_ARM=peer_only here; run feedback/memory ablations on a separate branch."
+        exit 1
+        ;;
+    *) echo "Error: SDPO_ARM must be peer_only"; exit 1 ;;
 esac
+RAW_FEEDBACK_MODE="${3:-${TAU3_LIVE_FEEDBACK_FORMAT:-}}"
+if [ -z "$RAW_FEEDBACK_MODE" ]; then
+    RAW_FEEDBACK_MODE="none"
+fi
+case "$RAW_FEEDBACK_MODE" in
+    structured|json) FEEDBACK_MODE="json" ;;
+    text|plain|plain_text) FEEDBACK_MODE="plain_text" ;;
+    none|off|false|0) FEEDBACK_MODE="none" ;;
+    *) echo "Error: feedback_mode must be json, plain_text, or none"; exit 1 ;;
+esac
+export TAU3_LIVE_FEEDBACK_FORMAT="$FEEDBACK_MODE"
+if [ "$FEEDBACK_MODE" != "none" ]; then
+    echo "Error: guarded faithful Tau3 SDPO does not allow heuristic teacher feedback."
+    echo "Set feedback_mode=none; diagnostic-feedback ablations belong on a separate branch."
+    exit 1
+fi
+SDPO_MEMORY_ENABLED_NORMALIZED="$(printf '%s' "${SDPO_MEMORY_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
+if [ "$SDPO_MEMORY_ENABLED_NORMALIZED" != "false" ] && [ "$SDPO_MEMORY_ENABLED_NORMALIZED" != "0" ]; then
+    echo "Error: guarded faithful Tau3 SDPO does not allow SDPO memory/note cards."
+    echo "Use the Note-SDPO branch for memory experiments."
+    exit 1
+fi
 SDPO_TEACHER_BACKEND="${SDPO_TEACHER_BACKEND:-ema_ref}"
 case "$SDPO_TEACHER_BACKEND" in
     ema|ema_ref|paper_ema) SDPO_TEACHER_BACKEND="ema_ref" ;;
@@ -166,12 +178,6 @@ ARGS=(
     "tau3.sdpo.reprompt_truncation=${SDPO_REPROMPT_TRUNCATION:-right}"
     "tau3.sdpo.teacher_backend=${SDPO_TEACHER_BACKEND:-ema_ref}"
     "tau3.sdpo.teacher_update_rate=${SDPO_TEACHER_UPDATE_RATE:-0.05}"
-    "tau3.sdpo.memory.enabled=${SDPO_MEMORY_ENABLED:-false}"
-    "tau3.sdpo.memory.path=${SDPO_MEMORY_PATH:-}"
-    "tau3.sdpo.memory.mode=${SDPO_MEMORY_MODE:-relevant}"
-    "tau3.sdpo.memory.inject_when=${SDPO_MEMORY_INJECT_WHEN:-no_solution}"
-    "tau3.sdpo.memory.fail_on_error=${SDPO_MEMORY_FAIL_ON_ERROR:-true}"
-    "tau3.sdpo.memory.allow_without_feedback=${SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK:-false}"
     "tau3.sdpo.target_guard.enabled=${SDPO_TARGET_GUARD_ENABLED:-true}"
     "tau3.sdpo.target_guard.corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0}"
     "tau3.sdpo.target_guard.mask_nonterminal=${SDPO_TARGET_GUARD_MASK_NONTERMINAL:-true}"
@@ -196,36 +202,14 @@ ARGS=(
     "trainer.nnodes=${NNODES:-1}"
 )
 
-if [ "$SDPO_ARM" = "original" ]; then
-    # Match the SDPO paper/code default teacher-context routing: use a successful
-    # peer demonstration when one exists, otherwise fall back to rich environment
-    # feedback for failed samples. This avoids the zero-target failure mode of
-    # the peer-only diagnostic arm on all-fail rollout groups.
-    ARGS+=("tau3.sdpo.include_environment_feedback=true")
-    ARGS+=("tau3.sdpo.use_successful_peer_solution=true")
-    ARGS+=("tau3.sdpo.only_failed_with_feedback=true")
-    ARGS+=("tau3.sdpo.dont_reprompt_on_self_success=true")
-    ARGS+=("tau3.sdpo.environment_feedback_only_without_solution=true")
-    ARGS+=("tau3.sdpo.serialize_nonstring_feedback=true")
-elif [ "$SDPO_ARM" = "vanilla_peer" ]; then
-    # Diagnostic peer-only arm: successful peer solution demonstrations are the
-    # teacher context; environment feedback is disabled. This is not the main
-    # paper-style baseline for Tau3.
-    ARGS+=("tau3.sdpo.include_environment_feedback=false")
-    ARGS+=("tau3.sdpo.use_successful_peer_solution=true")
-    ARGS+=("tau3.sdpo.only_failed_with_feedback=false")
-    ARGS+=("tau3.sdpo.dont_reprompt_on_self_success=false")
-    ARGS+=("tau3.sdpo.environment_feedback_only_without_solution=false")
-    ARGS+=("tau3.sdpo.serialize_nonstring_feedback=false")
-else
-    # Diagnostic feedback-only Tau3 SDPO variant for ablation/debugging.
-    ARGS+=("tau3.sdpo.include_environment_feedback=true")
-    ARGS+=("tau3.sdpo.use_successful_peer_solution=false")
-    ARGS+=("tau3.sdpo.only_failed_with_feedback=true")
-    ARGS+=("tau3.sdpo.dont_reprompt_on_self_success=true")
-    ARGS+=("tau3.sdpo.environment_feedback_only_without_solution=true")
-    ARGS+=("tau3.sdpo.serialize_nonstring_feedback=true")
-fi
+# Faithful/minimal Tau3 SDPO baseline: successful same-UID peer
+# demonstrations only. No heuristic Tau3 diagnostic feedback and no memory.
+ARGS+=("tau3.sdpo.include_environment_feedback=false")
+ARGS+=("tau3.sdpo.use_successful_peer_solution=true")
+ARGS+=("tau3.sdpo.only_failed_with_feedback=true")
+ARGS+=("tau3.sdpo.dont_reprompt_on_self_success=true")
+ARGS+=("tau3.sdpo.environment_feedback_only_without_solution=false")
+ARGS+=("tau3.sdpo.serialize_nonstring_feedback=false")
 
 if [ -n "${ROLLOUT_DATA_DIR:-}" ]; then
     ARGS+=("trainer.rollout_data_dir=$ROLLOUT_DATA_DIR")
@@ -301,7 +285,7 @@ echo "SDPO fail-fast finite probes: fail_fast=${SDPO_FAIL_FAST_NONFINITE:-0} ema
 echo "SDPO logprob diagnostics: ${SDPO_LOGPROB_DIAGNOSTICS:-0}"
 echo "SDPO CUDA memory diagnostics: ${SDPO_CUDA_MEMORY_DIAGNOSTICS:-${SDPO_LOGPROB_DIAGNOSTICS:-0}}"
 echo "SDPO target guard: enabled=${SDPO_TARGET_GUARD_ENABLED:-true} corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0} parse_error=${SDPO_TARGET_GUARD_MASK_PARSE_ERROR:-true} open_think=${SDPO_TARGET_GUARD_MASK_OPEN_THINK:-true} repetition=${SDPO_TARGET_GUARD_MASK_REPETITION:-true}"
-echo "SDPO memory: enabled=${SDPO_MEMORY_ENABLED:-false} mode=${SDPO_MEMORY_MODE:-relevant} inject_when=${SDPO_MEMORY_INJECT_WHEN:-no_solution} allow_without_feedback=${SDPO_MEMORY_ALLOW_WITHOUT_FEEDBACK:-false} path=${SDPO_MEMORY_PATH:-<unset>}"
+echo "SDPO teacher context: successful_peer_only=true heuristic_feedback=false memory=false"
 echo "Trainer resume: mode=${RESUME_MODE:-auto} from=${RESUME_FROM_PATH:-<auto/latest>}"
 echo "vLLM profile: $TAU3_VLLM_PROFILE"
 echo "VLLM_USE_V1: ${VLLM_USE_V1:-<unset>}"

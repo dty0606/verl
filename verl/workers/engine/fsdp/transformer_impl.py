@@ -801,6 +801,7 @@ class FSDPEngine(BaseEngine):
             grad_norm (float): Norm of gradients before clipping.
         """
         assert self.optimizer_config.clip_grad is not None
+        self._last_optimizer_step_skipped = False
 
         # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__.
         scaler = getattr(self, "scaler", None)
@@ -848,6 +849,7 @@ class FSDPEngine(BaseEngine):
             if not torch.isfinite(grad_norm):
                 print(f"WARN: grad_norm is not finite: {grad_norm}")
                 self.optimizer.zero_grad()
+                self._last_optimizer_step_skipped = True
             else:
                 self.optimizer.step()
 
@@ -1226,6 +1228,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
         distillation_return_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_return_topk", default=False)
         distillation_gather_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_gather_topk", default=False)
         distillation_topk = int(tu.get_non_tensor_data(data=micro_batch, key="distillation_topk", default=100))
+        needs_sdpo_topk_logits = distillation_use_topk or distillation_return_topk or distillation_gather_topk
+
+        if needs_sdpo_topk_logits and use_fused_kernels:
+            raise NotImplementedError(
+                "Full-logit/top-k SDPO is not supported with use_fused_kernels=True: "
+                "fused kernels do not materialize logits needed for student/teacher top-k distillation."
+            )
+        if needs_sdpo_topk_logits and not use_remove_padding:
+            raise NotImplementedError(
+                "Full-logit/top-k SDPO is only supported with use_remove_padding=True in the guarded Tau3 path."
+            )
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(

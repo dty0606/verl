@@ -107,26 +107,25 @@ trainer:
 
 tau3:
   runtime: ${oc.env:TAU3_LIVE_RUNTIME,official_gym}
-  feedback_mode: ${oc.env:TAU3_LIVE_FEEDBACK_FORMAT,json}
+  feedback_mode: ${oc.env:TAU3_LIVE_FEEDBACK_FORMAT,none}
   domain: airline
   selected_task_ids: ${oc.env:TAU3_LIVE_TASK_IDS,}
   sdpo:
     enabled: True
-    # Default to the SDPO paper/code teacher-context routing: successful peer
-    # demonstration when available, otherwise environment feedback for failed
-    # samples. Peer-only and feedback-only arms remain launcher-controlled
-    # diagnostics, not the main Tau3 SDPO baseline.
+    # Faithful/minimal Tau3 SDPO default: successful peer demonstrations only.
+    # Heuristic Tau3 diagnostics are audit-only and must not be privileged
+    # teacher feedback in this guarded baseline.
     max_reprompt_len: 12288
     reprompt_truncation: right
     success_reward_threshold: 1.0
     failure_reward_threshold: 1.0
-    include_environment_feedback: True
+    include_environment_feedback: False
     use_successful_peer_solution: True
     only_failed_with_feedback: True
     dont_reprompt_on_self_success: True
-    environment_feedback_only_without_solution: True
+    environment_feedback_only_without_solution: False
     remove_thinking_from_demonstration: True
-    serialize_nonstring_feedback: True
+    serialize_nonstring_feedback: False
     # Faithful SDPO path: compute teacher logprobs with a dedicated ref copy
     # and update that copy after each actor update via
     # teacher <- (1 - rate) * teacher + rate * actor. Set to
@@ -150,7 +149,7 @@ tau3:
       repetition_max_count: 4
       max_tool_count: 32
     reprompt_template: |-
-      {prompt}{solution}{memory}{feedback}
+      {prompt}{solution}{feedback}
 
       Correctly solve the original task.
     solution_template: |-
@@ -163,20 +162,3 @@ tau3:
       The following is feedback from your unsuccessful earlier attempt:
 
       {feedback_raw}
-    memory:
-      enabled: False
-      # Teacher-side privileged memory only. The actor/student rollout context is
-      # unchanged; this section is used only when building SDPO teacher prompts.
-      path: ${oc.env:SDPO_MEMORY_PATH,}
-      mode: ${oc.env:SDPO_MEMORY_MODE,relevant}
-      inject_when: ${oc.env:SDPO_MEMORY_INJECT_WHEN,no_solution}
-      fail_on_error: True
-      allow_without_feedback: False
-      max_card_chars: 2200
-      query_failed_response_chars: 1400
-      template: |-
-
-        {memory_heading}:
-        {memory_card}
-
-        Use this memory only as decision guidance. Do not copy IDs, hidden facts, or raw wording.

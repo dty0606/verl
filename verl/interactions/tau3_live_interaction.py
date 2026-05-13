@@ -41,7 +41,7 @@ class Tau3LiveInteraction(BaseInteraction):
         self.max_steps = int(config.get("max_steps", 12))
         self.default_user_model = config.get("user_model") or os.environ.get("TAU3_LIVE_USER_MODEL")
         self.user_region = config.get("user_region", "us-east-1")
-        self.runtime = tau3_runtime_mode(config.get("runtime") or os.environ.get("TAU3_LIVE_RUNTIME", "proxy_legacy"))
+        self.runtime = tau3_runtime_mode(config.get("runtime") or os.environ.get("TAU3_LIVE_RUNTIME", "official_gym"))
 
     async def start_interaction(
         self,

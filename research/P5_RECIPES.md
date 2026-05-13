@@ -967,10 +967,11 @@ default so the normal diagnostics bundle stays small.
 
 ---
 
-## Recipe 9: One-Step Vanilla SDPO Smoke
+## Recipe 9: One-Step Faithful Peer-Only SDPO Smoke
 
 Run only after the SFT checkpoint passes vLLM serve and the one-step GRPO smoke.
-This is vanilla SDPO only: no memory/DENSE retrieval.
+This is faithful guarded SDPO only: successful-peer teacher context when
+available, no heuristic diagnostic feedback, and no memory/DENSE retrieval.
 
 ```bash
 cd ~/verl_tau3_sdpo
@@ -978,6 +979,7 @@ cd ~/verl_tau3_sdpo
 export HF_CKPT=$(ls -d checkpoints/SDPO/tau3_verl_sft/*/global_step_*/huggingface | tail -1)
 export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
 export TAU3_LIVE_RUNTIME=official_gym
+export TAU3_LIVE_FEEDBACK_FORMAT=none
 export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION=0
 export TAU3_BEDROCK_MAX_RETRIES=3
 export TAU3_BEDROCK_RETRY_DELAYS=15,30,60
@@ -1010,6 +1012,8 @@ export ROLLOUT_TOP_P=0.95
 export VAL_TEMPERATURE=0.2
 export VAL_TOP_P=0.95
 export PYTORCH_ALLOC_CONF=expandable_segments:True
+export SDPO_ARM=peer_only
+export SDPO_MEMORY_ENABLED=false
 
 mkdir -p logs outputs/sdpo_vlm_sft_smoke/rollout_data
 
@@ -1017,29 +1021,30 @@ ROLLOUT_DATA_DIR=outputs/sdpo_vlm_sft_smoke/rollout_data \
 bash run_local_tau3_sdpo_live_p5.sh \
   datasets/tau3_live_airline_canonical_json \
   sdpo_vlm_sft_smoke \
-  json \
+  none \
   2>&1 | tee logs/sdpo_vlm_sft_smoke.log
 ```
 
 Pass criteria:
 - Decoded assistant output is not gibberish
-- `tau3_live_result` and `feedback` appear in rollout/reward fields for failed samples
-- `self_distillation/reprompt_sample_fraction` is nonzero if failed samples have feedback
+- `tau3_live_result` appears in rollout/reward fields
+- `self_distillation/feedback_used_fraction=0`
+- `self_distillation/memory_used_fraction=0`
 - `actor/pg_loss`, `self_distillation/token_fraction`, and `actor/grad_norm` are finite
 
-**Stop if `self_distillation/reprompt_sample_fraction == 0` for a failed batch with feedback.**
+**Stop if `feedback_used_fraction` or `memory_used_fraction` is nonzero.**
 
 ---
 
-## Recipe 10: Full Vanilla SDPO Baseline
+## Recipe 10: Legacy Full Vanilla SDPO Baseline
 
-Run only after Recipe 9 passes. Keep all shared rollout settings identical to
-Recipe 8 so GRPO and SDPO remain an apples-to-apples comparison; the only
-algorithmic difference should be `loss_mode=sdpo` plus the feedback teacher path.
+This older recipe is kept for historical context. For new claim-bearing runs,
+use Recipe 11's faithful peer-only SDPO route instead of diagnostic-feedback
+SDPO.
 
 For the low-EBS east P5 vLLM V1 environment, prefer the dedicated original-SDPO
-overnight helper. It sets `SDPO_ARM=original` and moves all heavy artifacts to
-NVMe:
+overnight helper. The helper now maps to `SDPO_ARM=peer_only`,
+`TAU3_LIVE_FEEDBACK_FORMAT=none`, and moves all heavy artifacts to NVMe:
 
 ```bash
 cd ~/verl_tau3_sdpo_vllm20
@@ -1091,12 +1096,13 @@ turn/tool counts, response clip ratio, success count, tokens per success,
 
 ---
 
-## Recipe 11: Guarded Original SDPO - Clean 6K Gate Then 300-Step Run
+## Recipe 11: Faithful Peer-Only SDPO - Clean 6K Gate Then 300-Step Run
 
-**Goal**: run a clean guarded original-style SDPO from the SFT checkpoint with
-EMA teacher, full-logit/top-k JSD loss, target validity guards, Sonnet 4.6 user
-simulation, and a true 6K response cap. This is the next claim-bearing SDPO
-attempt after the old overnight run was downgraded to diagnostic-only evidence.
+**Goal**: run clean guarded Tau3 SDPO from the SFT checkpoint with EMA teacher,
+successful-peer teacher context only, full-logit/top-k JSD loss, target validity
+guards, Sonnet 4.6 user simulation, and a true 6K response cap. This is the next
+claim-bearing SDPO attempt after diagnostic-feedback SDPO was downgraded to
+diagnostic-only evidence.
 
 **Prerequisites**:
 - `sdpo-vllm20-v1` conda env active
@@ -1133,8 +1139,9 @@ export MODEL_ALIAS=real_sft_step800
 export TASK_PATH=datasets/tau3_live_airline_canonical_json
 export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
 
-# SDPO semantics: original paper-style routing with EMA teacher, no memory bank.
-export SDPO_ARM=original
+# SDPO semantics: faithful successful-peer routing with EMA teacher, no
+# heuristic feedback and no memory bank.
+export SDPO_ARM=peer_only
 export SDPO_TEACHER_BACKEND=ema_ref
 export SDPO_MEMORY_ENABLED=false
 export SDPO_MEMORY_PATH=""
@@ -1195,7 +1202,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export AWS_REGION=us-west-2
 export AWS_DEFAULT_REGION=us-west-2
 
-nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" json \
+nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" none \
   > ~/tw/logs/${RUN_STEM}.nohup.log 2>&1 &
 echo $! > ~/tw/logs/${RUN_STEM}.pid
 disown
@@ -1212,6 +1219,10 @@ grep "Training Progress" ~/tw/logs/${RUN_STEM}.nohup.log | tail -1
 - `data.max_response_length=6144`
 - `max_model_len=14336`
 - `tau3.sdpo.max_reprompt_len=4096`
+- `tau3.sdpo.include_environment_feedback=false`
+- `tau3.sdpo.use_successful_peer_solution=true`
+- `self_distillation/feedback_used_fraction=0`
+- `self_distillation/memory_used_fraction=0`
 - `data.train_batch_size=4`
 - `actor_rollout_ref.actor.ppo_mini_batch_size=4`
 - `actor_rollout_ref.rollout.n=8`
@@ -1232,7 +1243,7 @@ export TOTAL_TRAINING_STEPS=300
 export TOTAL_EPOCHS=300
 export TEST_FREQ=30
 export SAVE_FREQ=30
-nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" json \
+nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" none \
   > ~/tw/logs/${RUN_STEM}.nohup.log 2>&1 &
 echo $! > ~/tw/logs/${RUN_STEM}.pid
 disown

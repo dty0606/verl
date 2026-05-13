@@ -7,7 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 from verl.utils.tau3_diagnostics import build_safe_diagnostic, compact_text, diagnostic_scalar_metrics
-from verl.utils.tau3_feedback_renderers import normalize_feedback_mode, normalize_feedback_renderer, render_feedback
+from verl.utils.tau3_feedback_renderers import normalize_feedback_mode, normalize_feedback_renderer
 from verl.utils.tau3_live_runtime import compute_live_task_reward
 
 
@@ -135,7 +135,7 @@ def _feedback_mode(extra_info: dict[str, Any] | None) -> str:
         os.environ.get("TAU3_LIVE_FEEDBACK_FORMAT")
         or extra_info.get("teacher_feedback_format")
         or extra_info.get("feedback_mode")
-        or "json"
+        or "none"
     )
 
 
@@ -182,11 +182,11 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
     diagnostic_metrics = diagnostic_scalar_metrics(diagnostic)
     mode = _feedback_mode(extra_info)
     renderer = _feedback_renderer(extra_info)
-    feedback = "" if reward >= 1.0 else render_feedback(diagnostic, mode, renderer)
-    # Ensure feedback is always a string for downstream aggregators. The JSON
-    # renderer returns a dict; serialize it before emitting.
-    if isinstance(feedback, dict):
-        feedback = json.dumps(feedback, ensure_ascii=False, sort_keys=True)
+    # The faithful Tau3 SDPO baseline must not inject our deterministic
+    # diagnostic interpretation into the teacher prompt. Keep diagnostics as
+    # scalar audit metrics only; any future real environment-feedback path
+    # should use a separate explicit reward key rather than this heuristic field.
+    feedback = ""
 
     runtime = str(live_result.get("runtime") or extra_info.get("tau3_runtime") or "").lower()
     terminal = float(_is_terminal_live_result(live_result))
@@ -196,6 +196,7 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
     budget_exhausted = float(
         terminal_reason in {"truncated", "max_steps", "max_user_turns"}
         or reward_source == "official_gym_nonterminal_snapshot"
+        or diagnostic.primary_failure_type == "length_or_step_budget_failure"
     )
     turn_count = float(live_result.get("turn_count") or 0.0)
     tool_count = float(len(live_result.get("executed_tools") or []))

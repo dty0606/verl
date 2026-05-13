@@ -90,9 +90,9 @@ if [ "$SMOKE_MODE" = "grpo" ]; then
     bash run_local_tau3_grpo_live_p5.sh "$TASK_PATH" vllm_v1_image_smoke json \
     2>&1 | tee logs/vllm_v1_image_grpo_smoke.log
 else
-  export SDPO_ARM="${SDPO_ARM:-original}"
+  export SDPO_ARM="${SDPO_ARM:-peer_only}"
   ROLLOUT_DATA_DIR=outputs/vllm_v1_image_smoke/sdpo_rollout_data \
-    bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" vllm_v1_image_smoke json \
+    bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" vllm_v1_image_smoke none \
     2>&1 | tee logs/vllm_v1_image_sdpo_smoke.log
 fi
 EOS

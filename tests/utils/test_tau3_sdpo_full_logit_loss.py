@@ -117,8 +117,7 @@ def test_sdpo_topk_logits_processor_fails_fast_on_nan_teacher_logprobs():
         sdpo_losses._sdpo_topk_logits_processor(config, student_logits=student_logits, data=data)
 
 
-def test_sdpo_topk_loss_fails_fast_on_invalid_logprob_mass(monkeypatch):
-    monkeypatch.setenv("SDPO_FAIL_FAST_NONFINITE", "1")
+def test_sdpo_topk_loss_fails_fast_on_invalid_logprob_mass():
     # Finite, but not log-probabilities: exp(0) + exp(0) > 1.
     student = torch.tensor([[[0.0, 0.0]]])
     teacher = torch.log_softmax(torch.tensor([[[1.0, 0.0]]]), dim=-1)
@@ -239,6 +238,27 @@ def test_sdpo_topk_logits_processor_ignores_unselected_response_rows(monkeypatch
     assert torch.isfinite(output["sdpo_distillation_losses"]).all()
     assert output["sdpo_teacher_mass"][0, 2].item() == pytest.approx(1.0)
     assert output["sdpo_teacher_mass"][0, 3].item() <= 1.0
+
+
+def test_sdpo_selected_mask_refuses_nested_prompt_fallback():
+    values = torch.log_softmax(torch.tensor([[1.0, 0.0], [0.0, 1.0]]), dim=-1)
+    ids = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    offsets = torch.tensor([0, 2], dtype=torch.long)
+    data = TensorDict(
+        {
+            "teacher_logprobs": torch.nested.nested_tensor_from_jagged(values, offsets=offsets),
+            "teacher_ids": torch.nested.nested_tensor_from_jagged(ids, offsets=offsets),
+            "prompts": torch.nested.nested_tensor_from_jagged(torch.tensor([10]), offsets=torch.tensor([0, 1])),
+            "responses": torch.nested.nested_tensor_from_jagged(torch.tensor([11]), offsets=torch.tensor([0, 1])),
+            "attention_mask": torch.tensor([[1, 1]]),
+            "self_distillation_target_token_mask": torch.tensor([[1.0]]),
+        },
+        batch_size=[],
+    )
+    config = SimpleNamespace(policy_loss={"sdpo_alpha": 0.5, "sdpo_distillation_add_tail": True})
+
+    with pytest.raises(RuntimeError, match="Cannot align SDPO selected response mask"):
+        sdpo_losses._sdpo_topk_logits_processor(config, student_logits=torch.randn(1, 2, 4), data=data)
 
 
 def test_response_shaped_sampled_teacher_logprobs_are_not_unpadded_as_full_sequence():

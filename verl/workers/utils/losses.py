@@ -163,18 +163,23 @@ def _sdpo_selected_prediction_position_mask(data: TensorDict, total_nnz: int, de
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
     if prompt_ids.is_nested or response_ids.is_nested:
-        # Actor-update batches keep prompt/response tensors padded. If that ever
-        # changes, fall back to the conservative response-position mask rather
-        # than silently building a wrong selected-position mask.
-        return _sdpo_response_prediction_position_mask(data, total_nnz=total_nnz, device=device)
+        raise RuntimeError(
+            "Cannot align SDPO selected response mask for nested prompt/response tensors; "
+            "refusing to fall back to a broader response-position mask."
+        )
 
     attention_mask = data["attention_mask"]
     if attention_mask.is_nested:
-        return _sdpo_response_prediction_position_mask(data, total_nnz=total_nnz, device=device)
+        raise RuntimeError(
+            "Cannot align SDPO selected response mask for nested attention_mask; "
+            "refusing to fall back to a broader response-position mask."
+        )
 
     response_token_mask = response_token_mask.to(device=device, dtype=torch.bool)
     if response_token_mask.is_nested:
-        return _sdpo_response_prediction_position_mask(data, total_nnz=total_nnz, device=device)
+        raise RuntimeError(
+            "Cannot align nested SDPO selected response mask; refusing to fall back to a broader mask."
+        )
     if response_token_mask.ndim != 2 or response_token_mask.shape[0] != response_ids.shape[0]:
         raise RuntimeError(
             "Cannot align SDPO selected response mask with response tensor: "
@@ -250,9 +255,8 @@ def _sdpo_jensen_shannon_topk_loss(
     endpoints and the unnormalized interior JSD expression.
     """
     teacher_topk_log_probs = teacher_topk_log_probs.detach()
-    if _sdpo_fail_fast_nonfinite_enabled():
-        _validate_topk_log_probs("student_topk_log_probs", student_topk_log_probs)
-        _validate_topk_log_probs("teacher_topk_log_probs", teacher_topk_log_probs)
+    _validate_topk_log_probs("student_topk_log_probs", student_topk_log_probs)
+    _validate_topk_log_probs("teacher_topk_log_probs", teacher_topk_log_probs)
     if add_tail:
         student_distill_log_probs = _add_tail_log_prob(student_topk_log_probs)
         teacher_distill_log_probs = _add_tail_log_prob(teacher_topk_log_probs)
@@ -341,17 +345,17 @@ def _sdpo_topk_logits_processor(config: ActorConfig, student_logits: torch.Tenso
     student_log_probs = F.log_softmax(student_logits, dim=-1)
     if _sdpo_fail_fast_nonfinite_enabled():
         _raise_if_nonfinite_tensor("actor_student_log_probs", student_log_probs)
-        vocab_size = student_logits.shape[-1]
-        bad_ids = ((teacher_topk_ids < 0) | (teacher_topk_ids >= vocab_size)) & selected_prediction_mask.unsqueeze(-1)
-        if bool(bad_ids.any().item()):
-            first_bad = bad_ids.nonzero(as_tuple=False)[0]
-            bad_index = first_bad.detach().cpu().tolist()
-            bad_value = int(teacher_topk_ids[tuple(first_bad.tolist())].item())
-            raise RuntimeError(
-                "Invalid SDPO teacher top-k id reached actor loss "
-                f"shape={tuple(teacher_topk_ids.shape)} vocab_size={vocab_size} "
-                f"first_bad={bad_index} value={bad_value}"
-            )
+    vocab_size = student_logits.shape[-1]
+    bad_ids = ((teacher_topk_ids < 0) | (teacher_topk_ids >= vocab_size)) & selected_prediction_mask.unsqueeze(-1)
+    if bool(bad_ids.any().item()):
+        first_bad = bad_ids.nonzero(as_tuple=False)[0]
+        bad_index = first_bad.detach().cpu().tolist()
+        bad_value = int(teacher_topk_ids[tuple(first_bad.tolist())].item())
+        raise RuntimeError(
+            "Invalid SDPO teacher top-k id reached actor loss "
+            f"shape={tuple(teacher_topk_ids.shape)} vocab_size={vocab_size} "
+            f"first_bad={bad_index} value={bad_value}"
+        )
     student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
     student_topk_log_probs = torch.where(
         selected_prediction_mask.unsqueeze(-1), student_topk_log_probs, _safe_topk_log_probs_like(student_topk_log_probs)

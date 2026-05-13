@@ -1,6 +1,16 @@
 # Project: latest-VERL tau3 GRPO/SDPO fork
 
-Last Updated: 2026-05-09
+Last Updated: 2026-05-13
+
+### 2026-05-13 Faithful Tau3 SDPO baseline cleanup
+
+- Guarded baseline semantics are now **peer-only SDPO**: successful same-UID peer demonstrations are the only privileged teacher context.
+- Heuristic Tau3 diagnostic feedback is audit-only. It must not populate `feedback`, `teacher_feedback`, `reward_feedback`, or SDPO teacher prompts in this branch.
+- Note/memory routing is hard-disconnected from `tau3_sdpo_live.yaml`, the P5 launcher, and the trainer teacher-batch path. Use the Note-SDPO branch for memory experiments.
+- New faithful launch contract: `SDPO_ARM=peer_only`, `TAU3_LIVE_FEEDBACK_FORMAT=none`, `tau3.sdpo.include_environment_feedback=false`, `tau3.sdpo.use_successful_peer_solution=true`, `tau3.sdpo.memory` absent/disabled.
+- The Tau3 runtime default is `official_gym`; `proxy_legacy` remains available only by explicit opt-in for old debugging runs.
+- Length diagnostics now log rollout prompt/assistant response plus assistant thinking/tool/final tag-based components and teacher prompt/base/peer/feedback/memory components, alongside selected-target and guarded-target fractions.
+- P5 Recipe 11 supersedes older “original/feedback-hybrid” recipes for claim-bearing SDPO runs.
 
 ### 2026-05-09 SDPO NaN fail-fast diagnostics
 
@@ -28,7 +38,7 @@ Last Updated: 2026-05-09
 - A 3-step original SDPO smoke on P5 passed after the EMA teacher device/checkpoint fixes: actor checkpoint, optimizer shards, and `sdpo_ema_teacher` shards were saved.
 - A 100-step original SDPO audit later OOMed at step 7 during `actor_rollout_ref_compute_log_prob`, with PyTorch trying to allocate ~26.67 GiB while ~26.60 GiB was free on GPU 0. The last healthy steps had ordinary response lengths (~2K mean, ~3.1K max), so the risk is from full-vocab logit materialization in SDPO logprob/top-k paths, not simply visible response length.
 - Local Codex added opt-in diagnostics and launcher knobs, pending/now intended for Git sync: `SDPO_LOGPROB_DIAGNOSTICS`, `SDPO_CUDA_MEMORY_DIAGNOSTICS`, logprob dynamic-batch env passthrough, and pre-logprob batch length summaries. These are for debugging only and should not change training semantics when disabled.
-- Conservative next P5 run while debugging: keep `SDPO_ARM=original`, `SDPO_MEMORY_ENABLED=false`, `SDPO_TEACHER_BACKEND=ema_ref`, but cap `MAX_RESPONSE_LENGTH=8192`, `SDPO_MAX_REPROMPT_LEN=4096`, `MAX_MODEL_LEN=16384`, set `ROLLOUT_GPU_MEMORY_UTILIZATION=0.50`, and enable the two diagnostics env vars for the first safe audit.
+- Historical note, superseded on 2026-05-13: the old diagnostic-feedback run used `SDPO_ARM=original`; new claim-bearing guarded SDPO must use `SDPO_ARM=peer_only` and `TAU3_LIVE_FEEDBACK_FORMAT=none`.
 - Interpretation note: current successful-peer selection is deterministic but not semantic ranking. It collects eligible successes by current row order and uses `solution_idxs[0]`; sequence-length balancing may affect that order, so future ablations should compare `first_success` against `random_success` and `shortest/cleanest_success` for multi-turn agents.
 
 ### 2026-05-07 Multi-turn SDPO/GRPO masking failure-mode note
@@ -509,13 +519,13 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - A Python parser sanity check returns int types for Qwen XML numeric parameters.
 - Suggested stop conditions: resume load fails; first step prints "Training from scratch"; checkpoint save does not create `actor/huggingface/model*.safetensors` or equivalent HF weights after the first save; reward/terminal metrics collapse like the failed SDPO run.
 
-### 2026-05-05 SDPO original-style hybrid arm restored
+### 2026-05-05 SDPO original-style hybrid arm restored (historical, superseded)
 
 - Rechecked the upstream SDPO paper/code defaults before the next Tau3 run:
   - Paper/repo framing: SDPO uses feedback-conditioned self-teacher predictions and can also use successful high-reward rollouts as implicit feedback when rich feedback is unavailable.
   - Upstream `actor.self_distillation` defaults include `include_environment_feedback=True`, `environment_feedback_only_without_solution=True`, `dont_reprompt_on_self_success=True`, `remove_thinking_from_demonstration=True`, `distillation_topk=100`, `alpha=0.5`, `is_clip=2`, `max_reprompt_len=10240`, and `reprompt_truncation=right`.
   - Upstream `run_local_sdpo.sh` sets `rollout.n=8`, `policy_loss.loss_mode=sdpo`, `dont_reprompt_on_self_success=True`, and `alpha=0.5`; rich-feedback experiments use the feedback-enabled default path.
-- Corrected this latest-VERL Tau3 launcher/config so `SDPO_ARM=original` is now the default. `SDPO_ARM=vanilla` is accepted as an alias for this original-style hybrid arm. It means:
+- Historical behavior, superseded on 2026-05-13: this latest-VERL Tau3 launcher/config briefly used `SDPO_ARM=original` as the default. It meant:
   - `include_environment_feedback=true`
   - `use_successful_peer_solution=true`
   - `only_failed_with_feedback=true`
@@ -523,10 +533,9 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - `environment_feedback_only_without_solution=true`
   - `serialize_nonstring_feedback=true`
   - `reprompt_truncation=right`
-- Interpretation update:
-  - `SDPO_ARM=vanilla_peer` is now explicitly a diagnostic peer-only arm, not the main roadmap baseline and not the memory-SDPO proposal. It is success-gated and can produce empty-target batches on all-fail rollout groups.
-  - `SDPO_ARM=feedback_only` remains a diagnostic ablation.
-  - The overnight baseline should use `SDPO_ARM=original` and a short suffix such as `sdpo_original_full`.
+- Interpretation update, superseded on 2026-05-13:
+  - Claim-bearing guarded SDPO now uses `SDPO_ARM=peer_only` with no heuristic feedback and no memory.
+  - `feedback_only` / feedback-hybrid behavior belongs only in a separate explicit ablation branch.
 - Fidelity caveat:
   - This is original-style SDPO teacher-context routing in the latest-VERL Tau3 port, not a byte-for-byte upstream SDPO reproduction.
   - Current local loss remains sampled-token reverse-KL using stored `teacher_logprobs` (`SDPO_ALPHA=1.0` required by the port). It does not yet implement upstream full-logit/top-k/JSD/EMA teacher regularization. If the paper needs literal upstream SDPO, port those pieces as a separate fidelity task.
@@ -600,7 +609,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 - Six-way QC aligned on the environment path:
   - The corporate Windows RTX 3080 laptop can validate repo scripts, probes, and basic `nvidia-smi`, but it cannot prove P5/H100 vLLM, NCCL, FlashInfer, Ray, or 32K-context behavior without WSL/Docker/Linux GPU runtime.
   - The current SageMaker Code Editor P5 space cannot run Docker-in-Docker. Docker/ECR remains reproducibility infrastructure, but image build must happen outside this SM CE space or on a Docker-enabled SageMaker domain.
-  - For runnable paper-style SDPO today, prefer latest-VERL `SDPO_ARM=original` over old-repo `SDPO-paper-original`, unless the goal is specifically a historical-code ablation. Use `SDPO_ARM=original` or `SDPO_ARM=paper`; the launcher does not accept literal `paper_original`.
+  - Historical note, superseded on 2026-05-13: the runnable guarded SDPO branch now uses `SDPO_ARM=peer_only`; old `original`/`paper` aliases are intentionally rejected to avoid diagnostic-feedback leakage.
 - Added reproducibility helpers:
   - `scripts/probe_runtime_surface.py` emits a read-only JSON runtime surface probe for local/P5.
   - `scripts/p5_export_frozen_env.sh` exports a no-Docker frozen env manifest from the active P5 conda env.
@@ -680,12 +689,12 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - Large artifacts/checkpoints: `~/verl_tau3_sdpo/checkpoints`.
   - Tau2/Tau3 runtime dependency: `~/tau2-bench`.
 - Keep S3 sync region as `us-west-2` for the existing `s3://tianyd-rlvr-research/tau3-sdpo/latest-verl` bucket, but set `AWS_REGION=us-east-1` / `AWS_DEFAULT_REGION=us-east-1` for Bedrock/Tau3 user-simulator calls on east P5.
-- East readiness gates: vLLM V1 preflight, `vllm._C` import, `flash_attn` import, `nvcc`/`cicc` visibility, 3-step GRPO profile `02_auto_prefix_24k_48k`, then 1-step `MODE=sdpo SDPO_ARM=original` smoke before any overnight vanilla-SDPO baseline.
+- East readiness gates: vLLM V1 preflight, `vllm._C` import, `flash_attn` import, `nvcc`/`cicc` visibility, 3-step GRPO profile `02_auto_prefix_24k_48k`, then 1-step `MODE=sdpo SDPO_ARM=peer_only` smoke before any overnight faithful SDPO baseline.
 - East preflight found `cuda_runtime.h` only under Python `site-packages/nvidia/cuda_runtime/include`, not under `$CONDA_PREFIX/targets/x86_64-linux/include`. Root cause is missing CUDA runtime header package; `cuda-cudart` alone did not install headers. Install `cuda-cudart-dev=12.9.79` from `nvidia/label/cuda-12.9.1`, keep `CUDA_HOME="$CONDA_PREFIX/targets/x86_64-linux"`, and rerun preflight before GRPO smoke.
 - East GDN JIT then progressed one include deeper and failed on `crt/host_config.h`. This is the same FlashInfer/GDN JIT setup family, but a different missing CUDA component: install `cuda-crt=12.9.86`, verify `$CUDA_HOME/include/crt/host_config.h`, clear the failed `~/.cache/flashinfer/0.6.8.post1/90a/cached_ops/gdn_prefill_sm90` cache, then rerun the 3-step GRPO smoke.
 - East GDN JIT then progressed again and failed on `fatbinary_section.h`. This is still the same CUDA compiler-dev surface issue: install `cuda-nvcc-dev_linux-64=12.9.86`, `cuda-nvvm-dev_linux-64=12.9.86`, and `cuda-crt-dev_linux-64=12.9.86`; verify `$CUDA_HOME/include/fatbinary_section.h`; clear the FlashInfer GDN cache; rerun the 3-step GRPO smoke. This fix was confirmed on east P5: after the dev headers were installed and the cache was cleared, the run started without the GDN missing-header error. If another CUDA-internal header is missing on a future host, stop piecemeal fixes and install the broader `cuda-compiler=12.9.1` meta-package from `nvidia/label/cuda-12.9.1`.
 - East P5 has only a 99 GB EBS root but large ephemeral NVMe. For east smoke/full SDPO, set `NVME_ROOT=/mnt/sagemaker-nvme/tau3_sdpo` and export `TMPDIR`, `RAY_TMPDIR`, `SDPO_OUTPUT_ROOT`, `SDPO_CHECKPOINT_ROOT`, `LOG_ROOT`, `ROLLOUT_OUTPUT_ROOT`, `WANDB_DIR`, and cache dirs under NVMe. `ROLLOUT_OUTPUT_ROOT` alone is not enough because checkpoints still follow `SDPO_CHECKPOINT_ROOT`.
-- Added `scripts/p5_run_east_original_sdpo_full.sh` for the overnight east-P5 original-SDPO baseline. It assumes `sdpo-vllm20-v1` is active, sets `MODE=sdpo` and `SDPO_ARM=original`, uses profile `02_auto_prefix_24k_48k`, defaults to 300 steps with save/test every 30, keeps at most three actor checkpoints, and routes Ray temp/checkpoints/rollouts/W&B/cache/logs to `/mnt/sagemaker-nvme/tau3_sdpo`.
+- Added `scripts/p5_run_east_original_sdpo_full.sh` for the overnight east-P5 SDPO baseline. As of 2026-05-13 it maps to faithful `SDPO_ARM=peer_only` and `TAU3_LIVE_FEEDBACK_FORMAT=none`, uses profile `02_auto_prefix_24k_48k`, defaults to 300 steps with save/test every 30, keeps at most three actor checkpoints, and routes Ray temp/checkpoints/rollouts/W&B/cache/logs to `/mnt/sagemaker-nvme/tau3_sdpo`.
 - West clean-GRPO v2 run `ghyw4x9s` crashed at step 78 with clean rollout metrics (`prompt_clip=0`, `response_clip=0`, `budget_exhausted=0`, `env_error=0`, `bedrock_error=0`). Local disk check showed `/` container overlay at 100% despite large `/home` and `/mnt/sagemaker-nvme`. Added `scripts/p5_resume_west_grpo_vllm_v1_clean_from_step60.sh` to resume from the saved `global_step_60` checkpoint while forcing Ray temp, Python temp, W&B, HF/Torch/Triton/XDG caches, logs, rollouts, and new checkpoints to NVMe. Also hardened `scripts/p5_run_vllm_v1_capacity_matrix.sh` to default P5 heavy paths to `NVME_ROOT`.
 
 ### 2026-05-07 Tau3 Bedrock env-error guardrails

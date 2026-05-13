@@ -82,7 +82,7 @@ export TASK_PATH
 export TAU3_VLLM_PROFILE="${TAU3_VLLM_PROFILE:-qwen35_v1}"
 export TAU3_LIVE_RUNTIME="${TAU3_LIVE_RUNTIME:-official_gym}"
 export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION="${TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION:-0}"
-export TAU3_LIVE_FEEDBACK_FORMAT="${TAU3_LIVE_FEEDBACK_FORMAT:-json}"
+export TAU3_LIVE_FEEDBACK_FORMAT="${TAU3_LIVE_FEEDBACK_FORMAT:-none}"
 export ENABLE_THINKING="${ENABLE_THINKING:-true}"
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-3}"
 export TOTAL_EPOCHS="${TOTAL_EPOCHS:-3}"
@@ -167,8 +167,8 @@ run_profile() {
         if [ "$MODE" = "grpo" ]; then
             bash "$PROJECT_ROOT/run_local_tau3_grpo_live_p5.sh" "$TASK_PATH" "${RUN_NAME_PREFIX}_${name}" json
         else
-            SDPO_ARM="${SDPO_ARM:-original}" \
-                bash "$PROJECT_ROOT/run_local_tau3_sdpo_live_p5.sh" "$TASK_PATH" "${RUN_NAME_PREFIX}_${name}" json
+            SDPO_ARM="${SDPO_ARM:-peer_only}" \
+                bash "$PROJECT_ROOT/run_local_tau3_sdpo_live_p5.sh" "$TASK_PATH" "${RUN_NAME_PREFIX}_${name}" none
         fi
     ) 2>&1 | tee "$LOG_ROOT/${name}.log"
 }

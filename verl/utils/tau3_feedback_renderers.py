@@ -22,7 +22,7 @@ def render_plain_text_feedback(diag: TauDiagnostic) -> str:
     priority_focus = d.get("priority_focus") or []
 
     lines = [
-        "Official tau diagnostic feedback:",
+        "Heuristic Tau3 diagnostic feedback:",
         f"Primary failure: {d['primary_failure_type']}.",
         f"Failure stage: {d['failure_stage']}.",
         f"Localized turn: {d['localized_turn_index']}.",
@@ -87,7 +87,7 @@ def render_endpoint_boundary_feedback(diag: TauDiagnostic) -> dict:
 
 
 def normalize_feedback_mode(mode: str | None) -> Literal["plain_text", "json", "none"]:
-    value = (mode or "json").strip().lower()
+    value = (mode or "none").strip().lower()
     if value in {"text", "plain", "plain_text", "plaintext"}:
         return "plain_text"
     if value in {"structured", "json"}:

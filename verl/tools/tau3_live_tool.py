@@ -26,7 +26,7 @@ class Tau3LiveTool(BaseTool):
 
     def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
         super().__init__(config, tool_schema)
-        self.runtime = tau3_runtime_mode((config or {}).get("runtime") or os.environ.get("TAU3_LIVE_RUNTIME", "proxy_legacy"))
+        self.runtime = tau3_runtime_mode((config or {}).get("runtime") or os.environ.get("TAU3_LIVE_RUNTIME", "official_gym"))
 
     async def create(self, instance_id: Optional[str] = None, **kwargs) -> tuple[str, ToolResponse]:
         if instance_id is None:
@@ -43,7 +43,7 @@ class Tau3LiveTool(BaseTool):
             getattr(agent_data, "interaction_kwargs", {}).get("runtime")
             or getattr(getattr(agent_data, "interaction", None), "runtime", None)
             or self.runtime
-            or os.environ.get("TAU3_LIVE_RUNTIME", "proxy_legacy")
+            or os.environ.get("TAU3_LIVE_RUNTIME", "official_gym")
         )
         manager = _select_manager(runtime)
 

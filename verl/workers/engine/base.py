@@ -128,6 +128,9 @@ class BaseEngine:
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]
             outputs["metrics"]["grad_norm"] = grad_norm
+            optimizer_step_skipped = getattr(self, "_last_optimizer_step_skipped", None)
+            if optimizer_step_skipped is not None:
+                outputs["metrics"]["optimizer_step_skipped"] = float(bool(optimizer_step_skipped))
         return outputs
 
     def infer_batch(self, data: TensorDict, loss_function: Optional[Callable] = None) -> Any:
