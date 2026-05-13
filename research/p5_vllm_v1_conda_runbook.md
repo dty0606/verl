@@ -22,7 +22,7 @@ References checked on 2026-05-06: vLLM marks `v0.20.1` as the latest GitHub rele
 
 - Current SageMaker Code Editor P5 is container-based: no `systemctl`, no `yum`/`apt`, no Docker daemon.
 - Do not try Docker-in-Docker on SM CE. Build/push ECR images later from EC2, CodeBuild, GitHub Actions, or a Docker-enabled SageMaker domain.
-- P5 may not have Git. Use GitHub for Codex/Kiro sync, then S3 sync snapshots to P5.
+- Kiro/P5 execution sync is S3 snapshot only. Do not require Git on P5, and do not use `git pull`/`git log` as a P5 correctness gate.
 - P5 storage layout differs by instance. East P5 exposed a small 99 GB
   `/home/sagemaker-user`; West P5 exposed large `/home/sagemaker-user` but a
   tiny 37 GB container overlay at `/`. In both cases, do not let Ray, Python
@@ -32,11 +32,11 @@ References checked on 2026-05-06: vLLM marks `v0.20.1` as the latest GitHub rele
 
 ## Kiro To P5 Snapshot
 
-From a Git-capable Kiro/local machine:
+From the Kiro/local publisher:
 
 ```bash
 cd ~/verl_tau3_sdpo
-SOURCE_REVISION="$(git rev-parse --short HEAD)"
+SOURCE_REVISION="${SOURCE_REVISION:-s3snapshot-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 aws s3 sync ~/verl_tau3_sdpo/ s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/repo/ \
   --exclude ".git/*" \
@@ -49,12 +49,11 @@ aws s3 sync ~/verl_tau3_sdpo/ s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/re
   --region us-west-2
 ```
 
-If P5 has no Git and no existing `~/tau2-bench`, also sync a tau2-bench snapshot to P5:
+If P5 has no existing `~/tau2-bench`, publish a tau2-bench snapshot from the
+publisher machine to S3, then sync it to P5:
 
 ```bash
-git clone https://github.com/sierra-research/tau2-bench.git /tmp/tau2-bench
-git -C /tmp/tau2-bench checkout --detach 220b47844fb74d4351037e81055cf1e2948e4734
-aws s3 sync /tmp/tau2-bench/ s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/tau2-bench/ \
+aws s3 sync /path/to/tau2-bench/ s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/tau2-bench/ \
   --exclude ".git/*" \
   --region us-west-2
 ```

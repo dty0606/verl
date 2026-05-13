@@ -25,14 +25,14 @@ Build one reproducible container image for Tau3 latest-VERL runs on vLLM 0.20.x 
 
 ## P5 Build And Push
 
-P5 instances do not need Git metadata for this flow. Use GitHub only between Codex/Kiro, then sync the repo snapshot to P5 through S3. Pass the Git commit as `SOURCE_REVISION` so the image tag and ECR metadata still record the exact source version.
+P5 instances do not need Git metadata for this flow. Kiro/P5 execution sync is S3 snapshot only: publish the repo snapshot to S3, then sync that snapshot onto P5. Pass an explicit `SOURCE_REVISION`/snapshot label so the image tag and ECR metadata still record the source version.
 
 Do not build this image on the corporate laptop for validation. The laptop can run light syntax/docs checks, but the Docker build and smoke must happen on P5 because the image needs to prove the P5 GPU/CUDA/vLLM runtime.
 
 ```bash
-# Kiro/local side: after pulling the GitHub commit, publish the repo snapshot for P5.
+# Kiro/local side: publish the repo snapshot for P5.
 cd ~/verl_tau3_sdpo
-SOURCE_REVISION="$(git rev-parse --short HEAD)"
+SOURCE_REVISION="${SOURCE_REVISION:-s3snapshot-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 aws s3 sync ~/verl_tau3_sdpo/ s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/repo/ \
   --exclude ".git/*" \

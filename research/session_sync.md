@@ -2,6 +2,12 @@
 
 Last Updated: 2026-05-13
 
+### Current Kiro/P5 Sync Rule
+
+- Kiro/P5 execution sync is **S3 snapshot only**: Kiro publishes code to `s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/repo/`, and P5 pulls that snapshot with `aws s3 sync`.
+- Do not tell Kiro/P5 to `git pull`, `git fetch`, or validate runtime code with `git log`/`git rev-parse`; the P5 runtime tree may intentionally exclude `.git`.
+- GitHub/private remotes are for local Codex history and optional archival review only, not the authoritative Kiro/P5 execution path.
+
 ### 2026-05-13 Faithful Tau3 SDPO baseline cleanup
 
 - Guarded baseline semantics are now **peer-only SDPO**: successful same-UID peer demonstrations are the only privileged teacher context.
@@ -92,8 +98,8 @@ The intended path is:
 ## Current Migration Status
 
 - Latest-VERL fork and branch are active at `D:/AI/chatgpt/codex/tmp/verl_tau3_sdpo`.
-- Private remote for Kiro/P5 fresh clones: `https://github.com/dty0606/verl_tau3_sdpo.git`.
-- Fresh Kiro/P5 onboarding starts with `START_HERE_FOR_KIRO.md`; clone both the old archive repo and this new private execution repo.
+- Private remote is for local Codex history and optional archival review. Kiro/P5 execution uses the S3 snapshot path documented above, not fresh Git clones.
+- Fresh Kiro/P5 onboarding starts with `START_HERE_FOR_KIRO.md`, but current P5 code movement should be S3 snapshot sync.
 - Minimal Tau3 runtime files, tool schema, action parser, feedback/reward scorer, and migration docs have been copied into this fork.
 - Latest VERL's built-in `tool_agent` now has an optional Tau3 interaction path through `multi_turn.interaction_config_path`.
 - `tau3_qwen` tool parsing is registered for Qwen XML and legacy JSON tool-call outputs.
@@ -153,14 +159,14 @@ Verified in the new repo:
 - Fixed Qwen2-VL lazy flash-attn import by invoking the lazy loader inside `_custom_flash_attention_forward` before flash-attn capability checks or varlen calls.
 - Updated `scripts/tau3/test_thinking_stitching.py` so the diagnostic checks user-first ordering and catches shifted thinking traces.
 - Local Windows verification: `python -m py_compile` passed for the touched files; synthetic validator check confirmed the first real assistant/tool call receives the first thinking trace.
-- Next P5 action remains: pull latest main, run the thinking-stitching diagnostic on one real generated trajectory, then retry the tiny SFT export smoke.
+- Historical old-Git wording is superseded; current equivalent is: refresh the S3 repo snapshot on P5, run the thinking-stitching diagnostic on one real generated trajectory, then retry the tiny SFT export smoke.
 
 ### 2026-05-02 Codex QC hardening after commit `d3a1837e`
 
 - Commit `7711222a` handles serialized empty `tool_calls=[]` on the stripped leading greeting, not only `tool_calls=None`.
 - `scripts/tau3/test_thinking_stitching.py` now asserts assistant-turn count equals `turns` count before checking per-turn thinking text, so shifted/missing thinking supervision fails loudly.
 - Local verification repeated: `python -m py_compile` passed; synthetic Tau3 trajectory check passed with leading greeting, `tool_calls=[]`, one tool-call assistant turn, and one final assistant turn.
-- Kiro/P5 should pull private `main` at or after `7711222a` before retrying the SFT smoke.
+- Historical old-Git wording is superseded; current equivalent is: publish a repo snapshot containing `7711222a` or later to S3, then sync it onto P5 before retrying the SFT smoke.
 
 ### 2026-05-02 Codex SimpleSFTDataset tool-call normalization patch
 
@@ -516,7 +522,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - `CHECKPOINT_SAVE_CONTENTS=["model","optimizer","extra","hf_model"]` so checkpoints at 350/400/450/500 include eval-ready HF weights under `actor/huggingface/`.
 - Remote P5 must verify before launch:
   - `bash -n run_local_tau3_grpo_live_p5.sh`.
-  - `git rev-parse HEAD` is at or after this readiness update.
+  - S3-synced code contains this readiness update; do not rely on Git metadata on P5.
   - The resume path contains `actor/model_world_size_8_rank_0.pt` through rank 7 and `data.pt`.
   - A Python parser sanity check returns int types for Qwen XML numeric parameters.
 - Suggested stop conditions: resume load fails; first step prints "Training from scratch"; checkpoint save does not create `actor/huggingface/model*.safetensors` or equivalent HF weights after the first save; reward/terminal metrics collapse like the failed SDPO run.
@@ -590,7 +596,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - Layer latest-VERL Tau3 code and `tau2-bench` commit `220b47844fb74d4351037e81055cf1e2948e4734`.
   - Keep datasets, checkpoints, W&B, and outputs mounted from the P5 host rather than baked into the image.
 - ECR flow:
-  - GitHub is only for Codex/Kiro synchronization. P5 has no Git requirement; Kiro should sync the repo snapshot to S3, P5 should pull from S3, and the P5 build should pass `SOURCE_REVISION=<github_commit_short_sha>`.
+  - Kiro/P5 execution uses S3 snapshots. P5 has no Git requirement; Kiro should sync the repo snapshot to S3, P5 should pull from S3, and the P5 build should pass an explicit `SOURCE_REVISION`/snapshot label supplied by the publisher.
   - Build/push on P5 with `AWS_REGION`, `ECR_REPOSITORY`, `SOURCE_REVISION`, and `IMAGE_TAG`.
   - Script creates the ECR repo if missing, logs in, builds, runs baked-image preflight, tags, pushes, and prints final `image_uri` plus digest.
   - Do not use the corporate laptop to validate the Docker image. The laptop can do lightweight checks, but the authoritative build/smoke must be on P5 because that is the target GPU/CUDA/vLLM surface.

@@ -87,8 +87,8 @@ for pkg in ["torch", "transformers", "vllm", "verl"]:
     except Exception as exc:
         print(pkg, "UNKNOWN", exc)
 PY
-git rev-parse HEAD
-git status --short
+echo "S3 snapshot working tree: $(pwd)"
+find . -maxdepth 1 -type f | sort | head -20
 ```
 
 ## Stage 1: Tiny VLM-Format SFT Export Smoke

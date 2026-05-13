@@ -31,6 +31,11 @@ OLD_SDPO_ARCHIVE=~/SDPO-qwen35       # old archive, read-only reference
 
 ## S3 Sync
 
+Kiro/P5 execution sync is **S3 snapshot only**. Do not ask P5 to
+`git pull`, `git fetch`, or validate a Git checkout. GitHub commits are useful
+for local history, but the runnable P5 tree is whatever was published to
+`$S3_PREFIX/repo/` and then synced onto the host.
+
 ```bash
 export S3_PREFIX=s3://tianyd-rlvr-research/tau3-sdpo/latest-verl
 
@@ -92,7 +97,7 @@ Run before any training. Record output in `research/session_sync.md`.
 
 ```bash
 cd ~/verl_tau3_sdpo
-echo "=== Git ===" && git rev-parse HEAD && git status --short
+echo "=== S3 snapshot working tree ===" && pwd && find . -maxdepth 1 -type f | sort | head -20
 echo "=== Packages ==="
 python3 - <<'PY'
 import importlib.metadata as md

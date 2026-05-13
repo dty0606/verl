@@ -4,32 +4,31 @@ Date: 2026-05-02
 
 This document is the orientation note for a fresh Kiro/P5 work directory. It explains which repositories matter, why there are two repos, how Codex/Kiro/P5 sync should work, and what to do next.
 
-## Clone These Repositories
+## Current Kiro/P5 Sync Rule
 
-Create a fresh parent directory on the Kiro/P5 side, then clone both repos:
+Kiro/P5 execution uses **S3 snapshots, not Git**. Do not ask P5 to `git pull`,
+`git fetch`, or validate code with `git log`. The runnable tree is the snapshot
+published to `s3://tianyd-rlvr-research/tau3-sdpo/latest-verl/repo/`.
+
+Create or refresh the execution repo from S3:
 
 ```bash
-mkdir -p ~/tau3_sdpo_workspace
-cd ~/tau3_sdpo_workspace
-
-# Old archive / paper-development repo. Use for history, evidence, old recipes.
-git clone https://github.com/dty0606/SDPO.git dty0606_SDPO
-cd dty0606_SDPO
-git checkout codex/sdpo-tau3-transformers5-qwen35
-cd ..
-
-# New private execution repo. Use for all current SFT/GRPO/SDPO work.
-git clone https://github.com/dty0606/verl_tau3_sdpo.git verl_tau3_sdpo
-cd verl_tau3_sdpo
-git checkout main
+export S3_PREFIX=s3://tianyd-rlvr-research/tau3-sdpo/latest-verl
+mkdir -p ~/tau3_sdpo_workspace/verl_tau3_sdpo
+aws s3 sync "$S3_PREFIX/repo/" ~/tau3_sdpo_workspace/verl_tau3_sdpo/ \
+  --exclude ".git/*" \
+  --region us-west-2
 ```
 
 Suggested remote paths:
 
 ```bash
-OLD_SDPO_ARCHIVE=~/tau3_sdpo_workspace/dty0606_SDPO
 LATEST_VERL_ROOT=~/tau3_sdpo_workspace/verl_tau3_sdpo
 ```
+
+GitHub/private remotes are local archival conveniences only. If historical
+evidence from the old archive is needed, use an existing local copy or request a
+narrow artifact; do not make Git cloning part of P5 launch instructions.
 
 ## What Each Repo Is For
 
@@ -251,8 +250,8 @@ Before any long run, capture:
 
 ```bash
 cd ~/tau3_sdpo_workspace/verl_tau3_sdpo
-git rev-parse HEAD
-git status --short
+pwd
+find . -maxdepth 1 -type f | sort | head -20
 
 python - <<'PY'
 import importlib.metadata as md
