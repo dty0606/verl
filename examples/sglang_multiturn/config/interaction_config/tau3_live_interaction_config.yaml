@@ -2,7 +2,7 @@ interaction:
   - name: "tau3_live"
     class_name: "verl.interactions.tau3_live_interaction.Tau3LiveInteraction"
     config:
-      max_steps: 12
+      max_steps: ${oc.env:TAU3_LIVE_MAX_STEPS,50}
       user_region: ${oc.env:TAU3_LIVE_USER_REGION,us-east-1}
       user_model: ${oc.env:TAU3_LIVE_USER_MODEL,""}
       runtime: ${oc.env:TAU3_LIVE_RUNTIME,official_gym}
