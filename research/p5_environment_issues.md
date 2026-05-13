@@ -280,7 +280,8 @@ pip install "huggingface_hub>=1.5.0" --no-deps
 
 **Root cause:** SageMaker Code Editor runs inside a container. No Docker-in-Docker.
 
-**Status:** Use conda env path for now. Docker/ECR for reproducibility later on EC2/CodeBuild.
+**Status:** Use the conda env + S3 snapshot path. The Tau3 P5 Docker/ECR image
+workflow was deleted because SageMaker Code Editor cannot run it.
 
 ## GDN Kernel JIT: Smoke Warning vs Overnight Gate
 

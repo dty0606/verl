@@ -578,52 +578,31 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
   - `vllm._C` cannot import, which catches the torch/vLLM ABI mismatch seen on east P5.
   - `cuda_runtime.h` is missing, which catches the FlashInfer/GDN JIT failure seen on east P5.
   - Tau3 parser no longer preserves numeric XML parameters as ints.
-- Added `scripts/p5_setup_vllm_v1_env.sh` as a best-effort conda setup helper using `uv pip install vllm==$VLLM_VERSION --torch-backend $TORCH_BACKEND`. Prefer the official image when available; this script is for temporary P5 bring-up.
+- Added `scripts/p5_setup_vllm_v1_env.sh` as the supported SageMaker Code Editor P5 setup helper using `uv pip install vllm==$VLLM_VERSION --torch-backend $TORCH_BACKEND`. The old Docker/ECR image path is deleted for P5.
 - Remaining risk:
   - vLLM V1 hybrid KV support is exactly the moving part for Qwen3.5/GDN. The first P5 smoke must be 2-3 steps only, and if the page-size error persists, try `VLLM_BLOCK_SIZE`/`VLLM_MAMBA_BLOCK_SIZE` and `VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER` before full overnight training.
 
-### 2026-05-06 ECR image package for vLLM V1
+### 2026-05-06 ECR image package for vLLM V1 (deleted 2026-05-13)
 
-- Added a containerized path so future P5 runs do not depend on hand-upgraded conda environments:
-  - `.dockerignore`
-  - `docker/Dockerfile.tau3.vllm20.v1`
-  - `scripts/p5_build_push_ecr_vllm_v1.sh`
-  - `scripts/p5_run_image_smoke_vllm_v1.sh`
-  - `research/vllm_v1_image_plan.md`
-- Image strategy:
-  - Base image: `vllm/vllm-openai:v0.20.1-cu129` after the 2026-05-06 latest-vLLM QC update.
-  - The "openai" label means OpenAI-compatible HTTP API shape, not OpenAI API usage. We use it for the pinned vLLM/PyTorch/CUDA stack.
-  - Layer latest-VERL Tau3 code and `tau2-bench` commit `220b47844fb74d4351037e81055cf1e2948e4734`.
-  - Keep datasets, checkpoints, W&B, and outputs mounted from the P5 host rather than baked into the image.
-- ECR flow:
-  - Kiro/P5 execution uses S3 snapshots. P5 has no Git requirement; Kiro should sync the repo snapshot to S3, P5 should pull from S3, and the P5 build should pass an explicit `SOURCE_REVISION`/snapshot label supplied by the publisher.
-  - Build/push on P5 with `AWS_REGION`, `ECR_REPOSITORY`, `SOURCE_REVISION`, and `IMAGE_TAG`.
-  - Script creates the ECR repo if missing, logs in, builds, runs baked-image preflight, tags, pushes, and prints final `image_uri` plus digest.
-  - Do not use the corporate laptop to validate the Docker image. The laptop can do lightweight checks, but the authoritative build/smoke must be on P5 because that is the target GPU/CUDA/vLLM surface.
-- Smoke flow:
-  - `SMOKE_MODE=image_preflight` runs the vLLM V1 preflight against the baked image without mounting the host repo.
-  - `SMOKE_MODE=preflight` runs the vLLM V1 preflight against the mounted P5 repo/checkpoint/dataset.
-  - `SMOKE_MODE=grpo` runs a tiny 2-3 step GRPO smoke using the mounted SFT checkpoint and Tau3 dataset.
-  - `SMOKE_MODE=sdpo` is available but should wait until GRPO proves engine startup.
-- Stop before overnight training if any of these appear:
-  - `vllm._C` ABI/import failure.
-  - missing `cuda_runtime.h`.
-  - vLLM V1 hybrid KV page-size initialization failure.
-  - Tau3 parser numeric type regression.
-  - Bedrock credentials/model access failure during live user simulation.
+- Historical Docker/ECR files were removed because SageMaker Code Editor P5 cannot run Docker/image smokes:
+  `.dockerignore`, `docker/Dockerfile.tau3.vllm20.v1`, `scripts/p5_build_push_ecr_vllm_v1.sh`,
+  `scripts/p5_run_image_smoke_vllm_v1.sh`, and `research/vllm_v1_image_plan.md`.
+- Current P5 execution uses only the conda environment path plus S3 repo snapshots.
+- Stop before overnight training if any of these appear in the conda path:
+  `vllm._C` ABI/import failure, missing CUDA JIT headers, vLLM V1 hybrid KV page-size initialization failure,
+  Tau3 parser numeric type regression, or Bedrock credentials/model access failure during live user simulation.
 
 ### 2026-05-06 environment majority-vote update
 
 - Six-way QC aligned on the environment path:
-  - The corporate Windows RTX 3080 laptop can validate repo scripts, probes, and basic `nvidia-smi`, but it cannot prove P5/H100 vLLM, NCCL, FlashInfer, Ray, or 32K-context behavior without WSL/Docker/Linux GPU runtime.
-  - The current SageMaker Code Editor P5 space cannot run Docker-in-Docker. Docker/ECR remains reproducibility infrastructure, but image build must happen outside this SM CE space or on a Docker-enabled SageMaker domain.
+  - The corporate Windows RTX 3080 laptop can validate repo scripts, probes, and basic `nvidia-smi`, but it cannot prove P5/H100 vLLM, NCCL, FlashInfer, Ray, or long-context behavior.
+  - The current SageMaker Code Editor P5 space cannot run Docker-in-Docker. Docker/ECR is no longer part of the Tau3 P5 execution plan.
   - Historical note, superseded on 2026-05-13: the runnable guarded SDPO branch now uses `SDPO_ARM=peer_only`; old `original`/`paper` aliases are intentionally rejected to avoid diagnostic-feedback leakage.
 - Added reproducibility helpers:
   - `scripts/probe_runtime_surface.py` emits a read-only JSON runtime surface probe for local/P5.
   - `scripts/p5_export_frozen_env.sh` exports a no-Docker frozen env manifest from the active P5 conda env.
 - Hardened vLLM V1 smoke mechanics:
   - `build_cli_args_from_config` now normalizes snake_case config keys to kebab-case CLI flags and emits explicit `--no-*` flags for selected vLLM BooleanOptionalAction options such as `enable_prefix_caching=false`.
-  - `scripts/p5_run_image_smoke_vllm_v1.sh` now forwards optional hybrid-KV/mamba/cache and training-size env knobs into the Docker smoke container.
 - P5 smoke order for vLLM 0.20.x/V1:
   1. Current baseline with `TAU3_VLLM_PROFILE=qwen35_v1`.
   2. If page-size error persists, try `VLLM_DISABLE_HYBRID_KV_CACHE_MANAGER=true`.
@@ -634,7 +613,7 @@ After pulling Codex commit `479b41ed`, the remaining work is recipe + launch, no
 
 - Stage-1 QC result:
   - Current repo is suitable for a Kiro/P5 environment bring-up once the vLLM V1 capacity-matrix changes are pushed.
-  - vLLM latest PyPI/Docker tag checked on 2026-05-06 is `0.20.1`; defaults now use `vllm/vllm-openai:v0.20.1-cu129` and `VLLM_VERSION=0.20.1`.
+  - vLLM latest PyPI version checked on 2026-05-06 is `0.20.1`; conda setup defaults use `VLLM_VERSION=0.20.1`.
   - `0.20.0` remains the explicit fallback tag if Qwen3.5 hybrid KV support regresses on `0.20.1`.
 - No-Docker SM Code Editor path:
   - Use `scripts/p5_setup_vllm_v1_env.sh` to create `sdpo-vllm20-v1`.

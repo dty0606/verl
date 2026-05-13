@@ -4,7 +4,10 @@ Date: 2026-05-07
 
 ## Purpose
 
-Build a consistent latest-VERL + vLLM V1 environment on SageMaker Code Editor P5 when Docker is unavailable. This is the runnable path for GRPO, original SDPO, and Memory-SDPO bring-up until the reproducibility image is built on a Docker-capable host.
+Build a consistent latest-VERL + vLLM V1 environment on SageMaker Code Editor
+P5. This is the only supported P5 path for GRPO, faithful peer-only SDPO, and
+future SDPO ablations; SageMaker Code Editor cannot run the old Docker/ECR image
+workflow.
 
 Target stack for this branch:
 
@@ -21,7 +24,7 @@ References checked on 2026-05-06: vLLM marks `v0.20.1` as the latest GitHub rele
 ## Platform Facts
 
 - Current SageMaker Code Editor P5 is container-based: no `systemctl`, no `yum`/`apt`, no Docker daemon.
-- Do not try Docker-in-Docker on SM CE. Build/push ECR images later from EC2, CodeBuild, GitHub Actions, or a Docker-enabled SageMaker domain.
+- Do not try Docker-in-Docker or ECR image smokes on SM CE. The Tau3 P5 image workflow was deleted; use the conda/S3 snapshot path.
 - Kiro/P5 execution sync is S3 snapshot only. Do not require Git on P5, and do not use `git pull`/`git log` as a P5 correctness gate.
 - P5 storage layout differs by instance. East P5 exposed a small 99 GB
   `/home/sagemaker-user`; West P5 exposed large `/home/sagemaker-user` but a
@@ -475,7 +478,7 @@ After the first passing profile:
 
 ```bash
 RUN_NAME=vllm_v1_$(date +%Y%m%d_%H%M%S)
-SOURCE_REVISION=<github_commit_short_sha> \
+SOURCE_REVISION=<s3_snapshot_label> \
   bash scripts/p5_export_frozen_env.sh "outputs/frozen_env/$RUN_NAME"
 
 python scripts/probe_runtime_surface.py --indent 2 \

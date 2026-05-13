@@ -68,7 +68,6 @@ def test_guarded_trainer_has_no_teacher_feedback_or_memory_sections():
 def test_p5_sdpo_helpers_use_faithful_peer_only_route():
     east = (ROOT / "scripts" / "p5_run_east_original_sdpo_full.sh").read_text(encoding="utf-8")
     matrix = (ROOT / "scripts" / "p5_run_vllm_v1_capacity_matrix.sh").read_text(encoding="utf-8")
-    image_smoke = (ROOT / "scripts" / "p5_run_image_smoke_vllm_v1.sh").read_text(encoding="utf-8")
 
     assert "TAU3_LIVE_FEEDBACK_FORMAT:-none" in east
     assert "export SDPO_ARM=peer_only" in east
@@ -81,8 +80,6 @@ def test_p5_sdpo_helpers_use_faithful_peer_only_route():
     assert "TAU3_LIVE_FEEDBACK_FORMAT:-none" in matrix
     assert 'SDPO_ARM="${SDPO_ARM:-peer_only}"' in matrix
     assert '"${RUN_NAME_PREFIX}_${name}" none' in matrix
-    assert 'export SDPO_ARM="${SDPO_ARM:-peer_only}"' in image_smoke
-    assert '"$TASK_PATH" vllm_v1_image_smoke none' in image_smoke
 
 
 def test_trainer_metrics_keep_selected_mask_and_no_target_teacher_lengths():
