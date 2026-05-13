@@ -2,14 +2,14 @@ defaults:
   - ppo_trainer
   - _self_
 
-max_model_len: 24576
+max_model_len: 14336
 
 data:
-  train_batch_size: 8
-  val_batch_size: 8
+  train_batch_size: 4
+  val_batch_size: 4
   return_raw_chat: True
-  max_prompt_length: 16384
-  max_response_length: 4096
+  max_prompt_length: 8192
+  max_response_length: 6144
   filter_overlong_prompts: True
   truncation: error
   shuffle: True
@@ -17,7 +17,7 @@ data:
 actor_rollout_ref:
   hybrid_engine: True
   actor:
-    ppo_mini_batch_size: 8
+    ppo_mini_batch_size: 4
     ppo_micro_batch_size_per_gpu: 1
     ppo_max_token_len_per_gpu: ${max_model_len}
     # Tau3 airline is language-only. Keep Qwen3.5 VLM visual weights fixed so
@@ -99,8 +99,8 @@ trainer:
   project_name: SDPO-${oc.env:USER}
   experiment_name: tau3_sdpo_live
   val_before_train: False
-  total_epochs: 300
-  total_training_steps: 300
+  total_epochs: 30
+  total_training_steps: 240
   test_freq: 30
   save_freq: 30
   default_local_dir: ${oc.env:SDPO_CHECKPOINT_ROOT,checkpoints/SDPO}/${trainer.project_name}/${trainer.experiment_name}
@@ -115,17 +115,14 @@ tau3:
     # Faithful/minimal Tau3 SDPO default: successful peer demonstrations only.
     # Heuristic Tau3 diagnostics are audit-only and must not be privileged
     # teacher feedback in this guarded baseline.
-    max_reprompt_len: 12288
+    max_reprompt_len: 6144
     reprompt_truncation: right
     success_reward_threshold: 1.0
     failure_reward_threshold: 1.0
-    include_environment_feedback: False
     use_successful_peer_solution: True
-    only_failed_with_feedback: True
+    only_failed_rollouts: True
     dont_reprompt_on_self_success: True
-    environment_feedback_only_without_solution: False
     remove_thinking_from_demonstration: True
-    serialize_nonstring_feedback: False
     # Faithful SDPO path: compute teacher logprobs with a dedicated ref copy
     # and update that copy after each actor update via
     # teacher <- (1 - rate) * teacher + rate * actor. Set to
@@ -133,9 +130,9 @@ tau3:
     teacher_backend: ${oc.env:SDPO_TEACHER_BACKEND,ema_ref}
     teacher_update_rate: ${oc.env:SDPO_TEACHER_UPDATE_RATE,0.05}
     target_guard:
-      enabled: True
-      # Preserve original SDPO row routing, but prevent corrupted target-side
-      # continuations from contributing actor loss once selected.
+      # Faithful baseline default is off. This remains available only as an
+      # explicit guarded ablation and must not change peer-only row routing.
+      enabled: False
       corrupted_row_weight: 0.0
       mask_nonterminal: True
       mask_budget_exhausted: True
@@ -149,7 +146,7 @@ tau3:
       repetition_max_count: 4
       max_tool_count: 32
     reprompt_template: |-
-      {prompt}{solution}{feedback}
+      {prompt}{solution}
 
       Correctly solve the original task.
     solution_template: |-
@@ -157,8 +154,3 @@ tau3:
       Correct solution:
 
       {successful_previous_attempt}
-    feedback_template: |-
-
-      The following is feedback from your unsuccessful earlier attempt:
-
-      {feedback_raw}

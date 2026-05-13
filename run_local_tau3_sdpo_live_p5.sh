@@ -19,6 +19,11 @@ TASK_INPUT="$1"
 SUFFIX="${2:-tau3_sdpo_baseline}"
 
 export TAU3_LIVE_RUNTIME="${TAU3_LIVE_RUNTIME:-official_gym}"
+if [ "$TAU3_LIVE_RUNTIME" != "official_gym" ]; then
+    echo "Error: faithful Tau3 SDPO baseline requires TAU3_LIVE_RUNTIME=official_gym."
+    echo "Proxy/legacy runtimes are not allowed for claim-bearing SDPO runs."
+    exit 1
+fi
 export TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION="${TAU3_LIVE_ALL_MESSAGES_AS_OBSERVATION:-0}"
 export TAU3_BEDROCK_MAX_RETRIES="${TAU3_BEDROCK_MAX_RETRIES:-3}"
 export TAU3_BEDROCK_RETRY_DELAYS="${TAU3_BEDROCK_RETRY_DELAYS:-15,30,60}"
@@ -26,6 +31,13 @@ export TAU3_BEDROCK_RETRY_JITTER="${TAU3_BEDROCK_RETRY_JITTER:-0.2}"
 export TAU3_MASK_ENV_ERROR_ROLLOUTS="${TAU3_MASK_ENV_ERROR_ROLLOUTS:-1}"
 export TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD="${TAU3_ENV_ERROR_SKIP_UPDATE_THRESHOLD:-0.25}"
 export TAU3_RETRY_STEP_ON_TRANSIENT="${TAU3_RETRY_STEP_ON_TRANSIENT:-0}"
+export TAU3_MARK_ENV_EXCEPTIONS="${TAU3_MARK_ENV_EXCEPTIONS:-false}"
+TAU3_MARK_ENV_EXCEPTIONS_NORMALIZED="$(printf '%s' "$TAU3_MARK_ENV_EXCEPTIONS" | tr '[:upper:]' '[:lower:]')"
+if [ "$TAU3_MARK_ENV_EXCEPTIONS_NORMALIZED" != "false" ] && [ "$TAU3_MARK_ENV_EXCEPTIONS_NORMALIZED" != "0" ]; then
+    echo "Error: faithful Tau3 SDPO baseline requires TAU3_MARK_ENV_EXCEPTIONS=false."
+    echo "Only classified Tau3/Bedrock env errors may be masked; unknown env exceptions should crash."
+    exit 1
+fi
 if [ -z "${TAU3_LIVE_USER_ARGS_JSON:-}" ]; then
     export TAU3_LIVE_USER_ARGS_JSON='{"num_retries":8,"timeout":120}'
 fi
@@ -103,6 +115,12 @@ if [ "$SDPO_MEMORY_ENABLED_NORMALIZED" != "false" ] && [ "$SDPO_MEMORY_ENABLED_N
     echo "Use the Note-SDPO branch for memory experiments."
     exit 1
 fi
+SDPO_TARGET_GUARD_ENABLED_NORMALIZED="$(printf '%s' "${SDPO_TARGET_GUARD_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
+if [ "$SDPO_TARGET_GUARD_ENABLED_NORMALIZED" != "false" ] && [ "$SDPO_TARGET_GUARD_ENABLED_NORMALIZED" != "0" ]; then
+    echo "Error: faithful Tau3 SDPO baseline keeps tau3.sdpo.target_guard disabled."
+    echo "Run target-guard ablations separately; this launcher keeps only runtime/tensor safety checks."
+    exit 1
+fi
 SDPO_TEACHER_BACKEND="${SDPO_TEACHER_BACKEND:-ema_ref}"
 case "$SDPO_TEACHER_BACKEND" in
     ema|ema_ref|paper_ema) SDPO_TEACHER_BACKEND="ema_ref" ;;
@@ -139,19 +157,19 @@ ARGS=(
     --config-name=tau3_sdpo_live
     "data.train_files=$TASK_DIR/train.parquet"
     "data.val_files=$TASK_DIR/test.parquet"
-    "data.train_batch_size=${TRAIN_BATCH_SIZE:-8}"
-    "data.val_batch_size=${VAL_BATCH_SIZE:-${TRAIN_BATCH_SIZE:-8}}"
-    "data.max_prompt_length=${MAX_PROMPT_LENGTH:-16384}"
-    "data.max_response_length=${MAX_RESPONSE_LENGTH:-16384}"
+    "data.train_batch_size=${TRAIN_BATCH_SIZE:-4}"
+    "data.val_batch_size=${VAL_BATCH_SIZE:-4}"
+    "data.max_prompt_length=${MAX_PROMPT_LENGTH:-8192}"
+    "data.max_response_length=${MAX_RESPONSE_LENGTH:-6144}"
     "+data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING:-true}"
-    "max_model_len=${MAX_MODEL_LEN:-32768}"
+    "max_model_len=${MAX_MODEL_LEN:-14336}"
     "actor_rollout_ref.model.path=$MODEL_PATH"
     "actor_rollout_ref.actor.optim.lr=${LR:-1e-6}"
     "actor_rollout_ref.actor.optim.lr_warmup_steps=${LR_WARMUP_STEPS:-0}"
-    "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-8}"
+    "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-4}"
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
     "actor_rollout_ref.actor.use_dynamic_bsz=${ACTOR_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}}"
-    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-32768}}"
+    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}}"
     "actor_rollout_ref.actor.freeze_vision_tower=${FREEZE_VISION_TOWER:-true}"
     "actor_rollout_ref.actor.policy_loss.loss_mode=sdpo"
     "actor_rollout_ref.actor.policy_loss.sdpo_full_logit_distillation=${SDPO_FULL_LOGIT_DISTILLATION:-true}"
@@ -167,18 +185,18 @@ ARGS=(
     "actor_rollout_ref.rollout.temperature=${ROLLOUT_TEMPERATURE:-0.4}"
     "actor_rollout_ref.rollout.top_p=${ROLLOUT_TOP_P:-0.95}"
     "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${ROLLOUT_LOG_PROB_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}}"
-    "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ROLLOUT_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-32768}}}"
+    "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ROLLOUT_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}}}"
     "actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${REF_LOG_PROB_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}}"
-    "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-32768}}}"
+    "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}}}"
     "actor_rollout_ref.rollout.val_kwargs.temperature=${VAL_TEMPERATURE:-0.4}"
     "actor_rollout_ref.rollout.val_kwargs.top_p=${VAL_TOP_P:-0.95}"
     "actor_rollout_ref.rollout.val_kwargs.n=${VAL_N:-4}"
     "algorithm.adv_estimator=grpo"
-    "tau3.sdpo.max_reprompt_len=${SDPO_MAX_REPROMPT_LEN:-16384}"
+    "tau3.sdpo.max_reprompt_len=${SDPO_MAX_REPROMPT_LEN:-6144}"
     "tau3.sdpo.reprompt_truncation=${SDPO_REPROMPT_TRUNCATION:-right}"
     "tau3.sdpo.teacher_backend=${SDPO_TEACHER_BACKEND:-ema_ref}"
     "tau3.sdpo.teacher_update_rate=${SDPO_TEACHER_UPDATE_RATE:-0.05}"
-    "tau3.sdpo.target_guard.enabled=${SDPO_TARGET_GUARD_ENABLED:-true}"
+    "tau3.sdpo.target_guard.enabled=${SDPO_TARGET_GUARD_ENABLED:-false}"
     "tau3.sdpo.target_guard.corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0}"
     "tau3.sdpo.target_guard.mask_nonterminal=${SDPO_TARGET_GUARD_MASK_NONTERMINAL:-true}"
     "tau3.sdpo.target_guard.mask_budget_exhausted=${SDPO_TARGET_GUARD_MASK_BUDGET_EXHAUSTED:-true}"
@@ -187,29 +205,27 @@ ARGS=(
     "tau3.sdpo.target_guard.mask_open_think=${SDPO_TARGET_GUARD_MASK_OPEN_THINK:-true}"
     "tau3.sdpo.target_guard.mask_repetition=${SDPO_TARGET_GUARD_MASK_REPETITION:-true}"
     "tau3.sdpo.target_guard.mask_tool_loop=${SDPO_TARGET_GUARD_MASK_TOOL_LOOP:-true}"
-    "tau3.sdpo.target_guard.max_response_tokens=${SDPO_TARGET_GUARD_MAX_RESPONSE_TOKENS:-${MAX_RESPONSE_LENGTH:-16384}}"
+    "tau3.sdpo.target_guard.max_response_tokens=${SDPO_TARGET_GUARD_MAX_RESPONSE_TOKENS:-${MAX_RESPONSE_LENGTH:-6144}}"
     "tau3.sdpo.target_guard.repetition_ngram_size=${SDPO_TARGET_GUARD_REPETITION_NGRAM_SIZE:-8}"
     "tau3.sdpo.target_guard.repetition_max_count=${SDPO_TARGET_GUARD_REPETITION_MAX_COUNT:-4}"
     "tau3.sdpo.target_guard.max_tool_count=${SDPO_TARGET_GUARD_MAX_TOOL_COUNT:-32}"
     "trainer.project_name=${PROJECT_NAME:-SDPO-${USER}}"
     "trainer.experiment_name=$EXP_NAME"
-    "trainer.total_epochs=${TOTAL_EPOCHS:-300}"
-    "trainer.total_training_steps=${TOTAL_TRAINING_STEPS:-300}"
+    "trainer.total_epochs=${TOTAL_EPOCHS:-30}"
+    "trainer.total_training_steps=${TOTAL_TRAINING_STEPS:-240}"
     "trainer.test_freq=${TEST_FREQ:-30}"
     "trainer.save_freq=${SAVE_FREQ:-30}"
     "trainer.resume_mode=${RESUME_MODE:-auto}"
     "trainer.n_gpus_per_node=${N_GPUS_PER_NODE:-8}"
     "trainer.nnodes=${NNODES:-1}"
+    "trainer.val_before_train=false"
 )
 
 # Faithful/minimal Tau3 SDPO baseline: successful same-UID peer
 # demonstrations only. No heuristic Tau3 diagnostic feedback and no memory.
-ARGS+=("tau3.sdpo.include_environment_feedback=false")
 ARGS+=("tau3.sdpo.use_successful_peer_solution=true")
-ARGS+=("tau3.sdpo.only_failed_with_feedback=true")
+ARGS+=("tau3.sdpo.only_failed_rollouts=true")
 ARGS+=("tau3.sdpo.dont_reprompt_on_self_success=true")
-ARGS+=("tau3.sdpo.environment_feedback_only_without_solution=false")
-ARGS+=("tau3.sdpo.serialize_nonstring_feedback=false")
 
 if [ -n "${ROLLOUT_DATA_DIR:-}" ]; then
     ARGS+=("trainer.rollout_data_dir=$ROLLOUT_DATA_DIR")
@@ -266,6 +282,16 @@ if [ -n "${VLLM_DISABLE_CASCADE_ATTN:-}" ]; then
     ARGS+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_cascade_attn=$VLLM_DISABLE_CASCADE_ATTN")
 fi
 
+for extra_arg in "${@:4}"; do
+    case "$extra_arg" in
+        tau3.sdpo.reprompt_template=*|tau3.sdpo.solution_template=*|tau3.sdpo.include_environment_feedback=*|tau3.sdpo.memory.*|+tau3.sdpo.memory.*|tau3.sdpo.target_guard.enabled=*|+tau3.sdpo.target_guard.enabled=*)
+            echo "Error: faithful Tau3 SDPO launcher forbids override: $extra_arg" >&2
+            echo "Use a separate ablation branch for feedback, memory, custom teacher templates, or target guards." >&2
+            exit 1
+            ;;
+    esac
+done
+
 echo "----------------------------------------------------------------"
 echo "Starting latest-VERL tau3 SDPO baseline"
 echo "Experiment: $EXP_NAME"
@@ -275,16 +301,16 @@ echo "Model alias: $MODEL_NAME"
 echo "Task dir: $TASK_DIR"
 echo "Thinking: ${ENABLE_THINKING:-true}"
 echo "Rollout n: ${ROLLOUT_BATCH_SIZE:-8}"
-echo "Max response length: ${MAX_RESPONSE_LENGTH:-16384}"
-echo "SDPO max reprompt len: ${SDPO_MAX_REPROMPT_LEN:-16384}"
+echo "Max response length: ${MAX_RESPONSE_LENGTH:-6144}"
+echo "SDPO max reprompt len: ${SDPO_MAX_REPROMPT_LEN:-6144}"
 echo "SDPO reprompt truncation: ${SDPO_REPROMPT_TRUNCATION:-right}"
 echo "SDPO teacher: backend=${SDPO_TEACHER_BACKEND:-ema_ref} ema_rate=${SDPO_TEACHER_UPDATE_RATE:-0.05}"
 echo "SDPO loss: full_logit=${SDPO_FULL_LOGIT_DISTILLATION:-true} alpha=${SDPO_ALPHA:-0.5} topk=${SDPO_DISTILLATION_TOPK:-100} add_tail=${SDPO_DISTILLATION_ADD_TAIL:-true} topk_source=${SDPO_TOPK_SOURCE:-student_pre_update}"
-echo "SDPO logprob dynamic bsz: actor=${ACTOR_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} rollout=${ROLLOUT_LOG_PROB_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} ref=${REF_LOG_PROB_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} token_caps actor=${PPO_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-32768}} rollout=${ROLLOUT_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-32768}}} ref=${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-32768}}}"
+echo "SDPO logprob dynamic bsz: actor=${ACTOR_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} rollout=${ROLLOUT_LOG_PROB_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} ref=${REF_LOG_PROB_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} token_caps actor=${PPO_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}} rollout=${ROLLOUT_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}}} ref=${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}}}"
 echo "SDPO fail-fast finite probes: fail_fast=${SDPO_FAIL_FAST_NONFINITE:-0} ema=${SDPO_EMA_FINITE_CHECK:-${SDPO_FAIL_FAST_NONFINITE:-0}}"
 echo "SDPO logprob diagnostics: ${SDPO_LOGPROB_DIAGNOSTICS:-0}"
 echo "SDPO CUDA memory diagnostics: ${SDPO_CUDA_MEMORY_DIAGNOSTICS:-${SDPO_LOGPROB_DIAGNOSTICS:-0}}"
-echo "SDPO target guard: enabled=${SDPO_TARGET_GUARD_ENABLED:-true} corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0} parse_error=${SDPO_TARGET_GUARD_MASK_PARSE_ERROR:-true} open_think=${SDPO_TARGET_GUARD_MASK_OPEN_THINK:-true} repetition=${SDPO_TARGET_GUARD_MASK_REPETITION:-true}"
+echo "SDPO target guard: enabled=${SDPO_TARGET_GUARD_ENABLED:-false} corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0} parse_error=${SDPO_TARGET_GUARD_MASK_PARSE_ERROR:-true} open_think=${SDPO_TARGET_GUARD_MASK_OPEN_THINK:-true} repetition=${SDPO_TARGET_GUARD_MASK_REPETITION:-true}"
 echo "SDPO teacher context: successful_peer_only=true heuristic_feedback=false memory=false"
 echo "Trainer resume: mode=${RESUME_MODE:-auto} from=${RESUME_FROM_PATH:-<auto/latest>}"
 echo "vLLM profile: $TAU3_VLLM_PROFILE"

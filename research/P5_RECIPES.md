@@ -1096,11 +1096,12 @@ turn/tool counts, response clip ratio, success count, tokens per success,
 
 ---
 
-## Recipe 11: Faithful Peer-Only SDPO - Clean 6K Gate Then 300-Step Run
+## Recipe 11: Faithful Peer-Only SDPO - Clean 6K 240-Step Run
 
 **Goal**: run clean guarded Tau3 SDPO from the SFT checkpoint with EMA teacher,
-successful-peer teacher context only, full-logit/top-k JSD loss, target validity
-guards, Sonnet 4.6 user simulation, and a true 6K response cap. This is the next
+successful-peer teacher context only, full-logit/top-k JSD loss, no heuristic
+diagnostic feedback, no Note-SDPO memory, Sonnet 4.6 user simulation, and a
+true 6K response cap. This is the next
 claim-bearing SDPO attempt after diagnostic-feedback SDPO was downgraded to
 diagnostic-only evidence.
 
@@ -1119,9 +1120,9 @@ diagnostic-only evidence.
 If this still OOMs before step 30, rerun the same recipe with
 `MAX_RESPONSE_LENGTH=4096` and `MAX_MODEL_LEN=12288`.
 
-**Critical**: Call `run_local_tau3_sdpo_live_p5.sh` directly. Do NOT use the
-capacity matrix wrapper (`p5_run_east_original_sdpo_full.sh`) — it overrides
-the memory caps with profile defaults.
+**Critical**: Call `run_local_tau3_sdpo_live_p5.sh` directly for the canonical
+west-P5 recipe. The east-P5 helper now delegates to that same launcher with the
+6K faithful defaults; the capacity matrix remains a separate systems smoke.
 
 ```bash
 cd ~/verl_tau3_sdpo_vllm20
@@ -1132,7 +1133,7 @@ ray stop --force 2>/dev/null || true
 rm -rf /tmp/ray
 
 # Run identity / artifact naming.
-export RUN_STEM=west_p5_original_sdpo_clean_r6k_b4n8_s46_30step_v1
+export RUN_STEM=west_p5_original_sdpo_clean_r6k_b4n8_s46_240step_v1
 export PROJECT_NAME=SDPO-vllm-v1-original-sdpo-clean
 export MODEL_PATH=$HOME/verl_tau3_sdpo/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface
 export MODEL_ALIAS=real_sft_step800
@@ -1145,16 +1146,16 @@ export SDPO_ARM=peer_only
 export SDPO_TEACHER_BACKEND=ema_ref
 export SDPO_MEMORY_ENABLED=false
 export SDPO_MEMORY_PATH=""
-export SDPO_MAX_REPROMPT_LEN=4096
+export SDPO_TARGET_GUARD_ENABLED=false
+export SDPO_MAX_REPROMPT_LEN=6144
+export SDPO_REPROMPT_TRUNCATION=right
 
-# Gate cadence. If this reaches step 30 cleanly, rerun the same recipe to 300
-# steps with RUN_STEM suffix `_300step_v1`, TOTAL_TRAINING_STEPS=300,
-# TOTAL_EPOCHS=300, TEST_FREQ=30, and SAVE_FREQ=30.
-export TOTAL_TRAINING_STEPS=30
+# Run cadence: 240 steps gives 8 validation/checkpoint points at 30,60,...,240.
+export TOTAL_TRAINING_STEPS=240
 export TOTAL_EPOCHS=30
-export TEST_FREQ=10
-export SAVE_FREQ=10
-export MAX_ACTOR_CKPT_TO_KEEP=3
+export TEST_FREQ=30
+export SAVE_FREQ=30
+export MAX_ACTOR_CKPT_TO_KEEP=9
 
 # Training shape: 4 tasks x 8 rollouts = 32 trajectories per step, 1 train
 # microbatch per GPU. Batch 4 is the current safe shape for full-logit SDPO.
@@ -1163,7 +1164,7 @@ export VAL_BATCH_SIZE=4
 export ROLLOUT_BATCH_SIZE=8
 export PPO_MINI_BATCH_SIZE=4
 export PPO_MICRO_BATCH_SIZE_PER_GPU=1
-export VAL_N=1
+export VAL_N=4
 
 # Memory-safety caps: true 8K response reached step 21, then OOMed in actor backward.
 # 6K response keeps long-rollout signal while leaving more backward-pass headroom.
@@ -1198,6 +1199,7 @@ export SDPO_LOGPROB_DIAGNOSTICS=1
 export SDPO_CUDA_MEMORY_DIAGNOSTICS=1
 export SDPO_FAIL_FAST_NONFINITE=1
 export SDPO_EMA_FINITE_CHECK=1
+export TAU3_MARK_ENV_EXCEPTIONS=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export AWS_REGION=us-west-2
 export AWS_DEFAULT_REGION=us-west-2
@@ -1218,11 +1220,12 @@ grep "Training Progress" ~/tw/logs/${RUN_STEM}.nohup.log | tail -1
 **Verify config landed correctly** (from W&B or early log):
 - `data.max_response_length=6144`
 - `max_model_len=14336`
-- `tau3.sdpo.max_reprompt_len=4096`
-- `tau3.sdpo.include_environment_feedback=false`
+- `tau3.sdpo.max_reprompt_len=6144`
 - `tau3.sdpo.use_successful_peer_solution=true`
+- `tau3.sdpo.target_guard.enabled=false`
 - `self_distillation/feedback_used_fraction=0`
 - `self_distillation/memory_used_fraction=0`
+- `self_distillation/teacher_prompt_saturation_active_fraction` is monitored
 - `data.train_batch_size=4`
 - `actor_rollout_ref.actor.ppo_mini_batch_size=4`
 - `actor_rollout_ref.rollout.n=8`
@@ -1235,23 +1238,13 @@ grep "Training Progress" ~/tw/logs/${RUN_STEM}.nohup.log | tail -1
 - W&B config shows 24576 or 49152 (capacity matrix override leaked)
 - W&B config shows Sonnet 4.5 instead of Sonnet 4.6
 - any `Non-finite`, invalid top-k mass, or EMA finite-check failure appears
-
-**If the 30-step gate is clean**:
-```bash
-export RUN_STEM=west_p5_original_sdpo_clean_r6k_b4n8_s46_300step_v1
-export TOTAL_TRAINING_STEPS=300
-export TOTAL_EPOCHS=300
-export TEST_FREQ=30
-export SAVE_FREQ=30
-nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" none \
-  > ~/tw/logs/${RUN_STEM}.nohup.log 2>&1 &
-echo $! > ~/tw/logs/${RUN_STEM}.pid
-disown
-```
+- `actor/update_skipped_empty_sdpo_target` is near 1.0 for many consecutive steps
 
 **Post-run analysis**:
 - Pull rollout JSONLs from `$ROLLOUT_DATA_DIR` for steps showing high `response_length/clip_ratio`
 - Check which UIDs produce saturated responses near 6144 tokens
-- Inspect target guard metrics: `target_guard_response_saturated_selected_fraction`
+- Inspect `teacher_prompt_saturation_active_fraction`; right-truncation matches
+  the upstream-style behavior, but high active saturation means the teacher peer
+  context is being clipped and should be reported.
 - Evaluate checkpoints with the canonical test20 grid and artifact auditor before
   comparing to GRPO step 270 baseline (0.512).

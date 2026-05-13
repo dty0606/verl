@@ -1665,51 +1665,6 @@ class RayPPOTrainer:
         batch.non_tensor_batch["uid"] = new_uids
 
     @staticmethod
-    def _collect_feedback(
-        *,
-        include_environment_feedback: bool,
-        reward_extra_infos_dict: Optional[dict[str, list]],
-        batch: DataProto,
-        batch_size: int,
-        serialize_nonstring_feedback: bool,
-    ) -> list[Optional[str]]:
-        if not include_environment_feedback:
-            return [None] * batch_size
-
-        values = None
-        for key in ("feedback", "teacher_feedback", "reward_feedback"):
-            if reward_extra_infos_dict is not None and key in reward_extra_infos_dict:
-                values = reward_extra_infos_dict[key]
-                break
-            if key in batch.non_tensor_batch:
-                values = batch.non_tensor_batch[key]
-                break
-        if values is None:
-            return [None] * batch_size
-
-        feedback: list[Optional[str]] = []
-        for item in list(values)[:batch_size]:
-            if item is None:
-                feedback.append(None)
-                continue
-            if hasattr(item, "item"):
-                item = item.item()
-            if isinstance(item, bytes):
-                item = item.decode("utf-8", errors="replace")
-            if not isinstance(item, str):
-                if not serialize_nonstring_feedback:
-                    feedback.append(None)
-                    continue
-                try:
-                    item = json.dumps(item, ensure_ascii=False, sort_keys=True)
-                except Exception:
-                    item = str(item)
-            feedback.append(item if item.strip() else None)
-        if len(feedback) < batch_size:
-            feedback.extend([None] * (batch_size - len(feedback)))
-        return feedback
-
-    @staticmethod
     def _collect_solutions_by_uid(
         batch: DataProto,
         reward_tensor: torch.Tensor,
@@ -1792,21 +1747,11 @@ class RayPPOTrainer:
             failed_mask = failed_mask & ~env_error_mask
         failed_mask_list = failed_mask.detach().cpu().tolist()
         target_guard_cfg = sdpo_cfg.get("target_guard", {}) if sdpo_cfg is not None else {}
-        demo_loss_mask, demo_guard_masks = build_sdpo_target_guard_mask(
+        _, demo_guard_masks = build_sdpo_target_guard_mask(
             response_mask=assistant_response_mask,
             response_texts=response_texts,
             reward_extra_infos_dict=reward_extra_infos_dict,
             guard_cfg=target_guard_cfg,
-        )
-        del demo_loss_mask
-        demo_safe_mask = (~demo_guard_masks["guarded"]) & ~env_error_mask
-
-        feedback_list = self._collect_feedback(
-            include_environment_feedback=bool(sdpo_cfg.get("include_environment_feedback", False)),
-            reward_extra_infos_dict=reward_extra_infos_dict,
-            batch=batch,
-            batch_size=batch_size,
-            serialize_nonstring_feedback=bool(sdpo_cfg.get("serialize_nonstring_feedback", False)),
         )
 
         use_successful_peer_solution = bool(sdpo_cfg.get("use_successful_peer_solution", True))
@@ -1815,7 +1760,6 @@ class RayPPOTrainer:
                 batch,
                 reward_tensor,
                 success_reward_threshold=success_threshold,
-                eligible_mask=demo_safe_mask,
             )
             if use_successful_peer_solution
             else {}
@@ -1839,68 +1783,48 @@ class RayPPOTrainer:
             else [None] * batch_size
         )
 
-        only_failed_with_feedback = bool(sdpo_cfg.get("only_failed_with_feedback", True))
-        feedback_only_without_solution = bool(sdpo_cfg.get("environment_feedback_only_without_solution", True))
+        only_failed_rollouts = bool(sdpo_cfg.get("only_failed_rollouts", True))
         reprompt_template = sdpo_cfg.get(
-            "reprompt_template", "{prompt}{solution}{feedback}\n\nCorrectly solve the original question."
+            "reprompt_template", "{prompt}{solution}\n\nCorrectly solve the original question."
         )
-        if "{memory}" in reprompt_template:
+        if "{feedback}" in reprompt_template or "{memory}" in reprompt_template:
             raise RuntimeError(
-                "Guarded Tau3 SDPO baseline forbids {memory} in the teacher reprompt template. "
-                "Use the Note-SDPO branch for memory experiments."
+                "Guarded Tau3 SDPO baseline allows only {prompt} and {solution} in the teacher reprompt template."
             )
         solution_template = sdpo_cfg.get("solution_template", "\n\nCorrect solution:\n\n{successful_previous_attempt}")
-        feedback_template = sdpo_cfg.get(
-            "feedback_template",
-            "\n\nThe following is feedback from your unsuccessful earlier attempt:\n\n{feedback_raw}",
-        )
-        memory_cfg = sdpo_cfg.get("memory", {}) or {}
-        if bool(memory_cfg.get("enabled", False)):
-            raise RuntimeError(
-                "Guarded Tau3 SDPO baseline forbids teacher-side memory/note cards. "
-                "Use the Note-SDPO branch for memory experiments."
-            )
 
         raw_prompts = list(batch.non_tensor_batch.get("raw_prompt", []))
         messages = []
         target_mask_values: list[float] = []
-        feedback_used = []
         solutions_used = []
         teacher_base_prompt_token_lengths = []
         teacher_solution_token_lengths = []
-        teacher_feedback_token_lengths = []
         for i in range(batch_size):
             raw_prompt = list(raw_prompts[i]) if i < len(raw_prompts) else []
             prompt_text = raw_prompt[-1].get("content", "") if raw_prompt else ""
             system_messages = raw_prompt[:-1] if raw_prompt else []
             on_failure_path = bool(failed_mask_list[i])
-            has_solution = solution_strs[i] is not None and (on_failure_path or not only_failed_with_feedback)
-            has_feedback = feedback_list[i] is not None and on_failure_path
-            use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
-            active = (has_solution or use_feedback) and (on_failure_path or not only_failed_with_feedback)
+            has_solution = solution_strs[i] is not None and (on_failure_path or not only_failed_rollouts)
+            active = has_solution and (on_failure_path or not only_failed_rollouts)
 
             solution_section = (
                 solution_template.format(successful_previous_attempt=solution_strs[i]) if has_solution else ""
             )
-            feedback_section = feedback_template.format(feedback_raw=feedback_list[i]) if use_feedback else ""
             base_prompt_text = "\n\n".join(
                 str(message.get("content", "")) for message in [*system_messages, {"content": prompt_text}]
             )
             teacher_base_prompt_token_lengths.append(count_text_tokens(self.tokenizer, base_prompt_text))
             teacher_solution_token_lengths.append(count_text_tokens(self.tokenizer, solution_section))
-            teacher_feedback_token_lengths.append(count_text_tokens(self.tokenizer, feedback_section))
             if active:
                 reprompt_kwargs = {
                     "prompt": prompt_text,
                     "solution": solution_section,
-                    "feedback": feedback_section,
                 }
                 reprompt_text = reprompt_template.format(**reprompt_kwargs)
             else:
                 reprompt_text = prompt_text
             messages.append(system_messages + [{"role": "user", "content": reprompt_text}])
             target_mask_values.append(1.0 if active else 0.0)
-            feedback_used.append(use_feedback)
             solutions_used.append(has_solution)
         length_metrics = self._build_tau3_length_metrics(
             batch=batch,
@@ -1912,7 +1836,6 @@ class RayPPOTrainer:
             zeros = torch.zeros(batch_size, dtype=torch.float32, device=responses.device)
             metrics = {
                 "self_distillation/reprompt_sample_fraction": 0.0,
-                "self_distillation/feedback_available_fraction": sum(f is not None for f in feedback_list) / batch_size,
                 "self_distillation/feedback_used_fraction": 0.0,
                 "self_distillation/success_sample_fraction": 0.0,
                 "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
@@ -1920,13 +1843,14 @@ class RayPPOTrainer:
                 "self_distillation/memory_used_fraction": 0.0,
                 "self_distillation/teacher_prompt_token_mean": 0.0,
                 "self_distillation/teacher_prompt_saturation_fraction": 0.0,
+                "self_distillation/teacher_prompt_saturation_active_fraction": 0.0,
                 "self_distillation/selected_target_token_fraction": 0.0,
-                "self_distillation/guarded_target_fraction": float(target_guard_masks["guarded"].float().mean().item()),
+                "self_distillation/guarded_target_fraction": float(demo_guard_masks["guarded"].float().mean().item()),
                 "tau3_length/teacher_prompt_tokens_mean": 0.0,
                 "tau3_length/teacher_prompt_tokens_max": 0.0,
                 "tau3_length/teacher_base_prompt_tokens_mean": float(np.mean(teacher_base_prompt_token_lengths)),
                 "tau3_length/teacher_peer_solution_tokens_mean": float(np.mean(teacher_solution_token_lengths)),
-                "tau3_length/teacher_feedback_tokens_mean": float(np.mean(teacher_feedback_token_lengths)),
+                "tau3_length/teacher_feedback_tokens_mean": 0.0,
                 "tau3_length/teacher_memory_tokens_mean": 0.0,
                 "tau3_length/teacher_component_decomposition_approx": 1.0,
             }
@@ -1964,13 +1888,6 @@ class RayPPOTrainer:
         teacher_prompt_attention_mask = teacher_prompt["attention_mask"].to(responses.device)
         teacher_prompt_lengths = teacher_prompt_attention_mask.float().sum(dim=1)
         teacher_prompt_saturated = teacher_prompt_lengths >= max_reprompt_len
-        active_tensor_for_saturation = torch.tensor(target_mask_values, dtype=torch.bool, device=responses.device)
-        if bool((teacher_prompt_saturated & active_tensor_for_saturation).any().item()):
-            saturated_count = int((teacher_prompt_saturated & active_tensor_for_saturation).sum().item())
-            raise RuntimeError(
-                "SDPO teacher prompt saturation would silently truncate active teacher context "
-                f"for {saturated_count} selected rows; increase tau3.sdpo.max_reprompt_len or reduce prompt length."
-            )
         teacher_input_ids = torch.cat([teacher_prompt_ids, responses], dim=1)
         teacher_attention_mask = torch.cat(
             [teacher_prompt_attention_mask, full_response_attention_mask.to(responses.device)], dim=1
@@ -1996,27 +1913,31 @@ class RayPPOTrainer:
         )
         teacher_batch.meta_info.update(batch.meta_info)
         teacher_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+        active_teacher_prompt_saturation = teacher_prompt_saturated & target_mask.to(torch.bool)
+        active_count = target_mask.float().sum().clamp(min=1.0)
         metrics = {
             "self_distillation/reprompt_sample_fraction": float(target_mask.mean().item()),
-            "self_distillation/feedback_available_fraction": sum(f is not None for f in feedback_list) / batch_size,
-            "self_distillation/feedback_used_fraction": sum(bool(x) for x in feedback_used) / batch_size,
+            "self_distillation/feedback_used_fraction": 0.0,
             "self_distillation/success_sample_fraction": sum(bool(x) for x in solutions_used) / batch_size,
             "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
             "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
-            "self_distillation/demo_guard_success_excluded_fraction": float(
-                (((seq_scores >= success_threshold) & ~demo_safe_mask).float().sum()
-                / (seq_scores >= success_threshold).float().sum().clamp(min=1.0)).item()
+            "self_distillation/demo_target_guard_success_fraction": float(
+                ((seq_scores >= success_threshold) & demo_guard_masks["guarded"]).float().sum().item()
+                / (seq_scores >= success_threshold).float().sum().clamp(min=1.0).item()
             ),
             "self_distillation/memory_used_fraction": 0.0,
             "self_distillation/teacher_prompt_token_mean": float(teacher_prompt_lengths.mean().item()),
             "self_distillation/teacher_prompt_saturation_fraction": float(
                 teacher_prompt_saturated.float().mean().item()
             ),
+            "self_distillation/teacher_prompt_saturation_active_fraction": float(
+                (active_teacher_prompt_saturation.float().sum() / active_count).item()
+            ),
             "tau3_length/teacher_prompt_tokens_mean": float(teacher_prompt_lengths.mean().item()),
             "tau3_length/teacher_prompt_tokens_max": float(teacher_prompt_lengths.max().item()),
             "tau3_length/teacher_base_prompt_tokens_mean": float(np.mean(teacher_base_prompt_token_lengths)),
             "tau3_length/teacher_peer_solution_tokens_mean": float(np.mean(teacher_solution_token_lengths)),
-            "tau3_length/teacher_feedback_tokens_mean": float(np.mean(teacher_feedback_token_lengths)),
+            "tau3_length/teacher_feedback_tokens_mean": 0.0,
             "tau3_length/teacher_memory_tokens_mean": 0.0,
             "tau3_length/teacher_component_decomposition_approx": 1.0,
         }
@@ -2432,6 +2353,14 @@ class RayPPOTrainer:
                             batch, reward_tensor, reward_extra_infos_dict
                         )
                         metrics.update(sdpo_metrics)
+                    skip_actor_update_due_empty_sdpo = False
+                    if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") == "sdpo":
+                        sdpo_target_token_mask = batch.batch.get("self_distillation_target_token_mask", None)
+                        if sdpo_target_token_mask is not None:
+                            skip_actor_update_due_empty_sdpo = float(sdpo_target_token_mask.sum().item()) <= 0.0
+                            metrics["self_distillation/empty_target_update_skipped"] = float(
+                                skip_actor_update_due_empty_sdpo
+                            )
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -2494,8 +2423,9 @@ class RayPPOTrainer:
                         )
 
                     # update critic
-                    if self.use_critic and skip_actor_update_due_env_error:
-                        metrics["critic/update_skipped_env_error"] = 1.0
+                    if self.use_critic and (skip_actor_update_due_env_error or skip_actor_update_due_empty_sdpo):
+                        metrics["critic/update_skipped_env_error"] = float(skip_actor_update_due_env_error)
+                        metrics["critic/update_skipped_empty_sdpo_target"] = float(skip_actor_update_due_empty_sdpo)
                     elif self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
                             critic_output = self._update_critic(batch)
@@ -2513,6 +2443,16 @@ class RayPPOTrainer:
                         with marked_timer("update_weights", timing_raw, color="red"):
                             self.checkpoint_manager.update_weights(self.global_steps)
                         metrics["actor/update_skipped_env_error"] = 1.0
+                    elif skip_actor_update_due_empty_sdpo:
+                        # Peer-only SDPO legitimately has no learning signal
+                        # for all-fail/all-success groups without a selected
+                        # failed row + successful same-UID peer. Do not run a
+                        # zero-loss AdamW step because weight decay would still
+                        # move the actor and EMA teacher.
+                        with marked_timer("update_weights", timing_raw, color="red"):
+                            self.checkpoint_manager.update_weights(self.global_steps)
+                        metrics["actor/update_skipped_empty_sdpo_target"] = 1.0
+                        metrics["self_distillation/ema_teacher_skipped_empty_target"] = 1.0
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
