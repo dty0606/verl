@@ -19,6 +19,7 @@ def test_evaluate_gates_passes_with_required_evidence():
     [sdpo_cuda_memory] {"phase": "actor_compute_log_prob", "event": "after"}
     [sdpo_cuda_memory] {"phase": "actor_update", "event": "after"}
     skip_actor_update_due_empty_sdpo cause=empty_target
+    self_distillation/same_uid_strict_mixed_fraction:0.0
     sdpo_mask_debug selected target mask sample row=0
     saving checkpoint checkpoints/foo/global_step_2
     teacher scheduling equivalence passed
@@ -42,6 +43,7 @@ def test_evaluate_gates_passes_with_required_evidence():
         "mask_debug_sample_present": "PASS",
         "checkpoint_saved_when_update_counter_changed": "PASS",
         "early_skip_cause_logged": "PASS",
+        "same_uid_homogeneity_metrics_present": "PASS",
         "cuda_memory_phase_metrics_present": "PASS",
         "teacher_scheduling_equivalence": "PASS",
     }
@@ -53,6 +55,7 @@ def test_optional_gates_skip_when_not_enabled():
     [sdpo_cuda_memory] {"phase": "actor_compute_log_prob", "event": "after"}
     [sdpo_cuda_memory] {"phase": "actor_update", "event": "after"}
     actor/update_skipped_empty_sdpo_target=1
+    [sdpo_same_uid_warning] no_mixed_strict_groups step=1 groups=4 all_success=2 all_fail=2
     reward/mean_at_1=0.25 pass^1=0.25
     """
 
@@ -63,6 +66,7 @@ def test_optional_gates_skip_when_not_enabled():
     assert by_name["checkpoint_saved_when_update_counter_changed"] == "SKIP"
     assert by_name["teacher_scheduling_equivalence"] == "SKIP"
     assert by_name["strict_reward_metrics_present"] == "PASS"
+    assert by_name["same_uid_homogeneity_metrics_present"] == "PASS"
 
 
 def test_missing_required_gate_fails_when_enabled():
@@ -78,6 +82,7 @@ def test_missing_required_gate_fails_when_enabled():
     assert by_name["mask_debug_sample_present"] == "FAIL"
     assert by_name["checkpoint_saved_when_update_counter_changed"] == "FAIL"
     assert by_name["early_skip_cause_logged"] == "FAIL"
+    assert by_name["same_uid_homogeneity_metrics_present"] == "FAIL"
     assert by_name["cuda_memory_phase_metrics_present"] == "FAIL"
     assert by_name["teacher_scheduling_equivalence"] == "FAIL"
 
@@ -110,3 +115,5 @@ def test_report_template_contains_global_safety_rules():
     assert "No synthetic feedback" in template
     assert "test_tau3_strict_action_reward.py" in template
     assert "test_tau3_sdpo_mask_debug.py" in template
+    assert "test_sdpo_same_uid_group_metrics.py" in template
+    assert "Same-UID homogeneity metrics" in template

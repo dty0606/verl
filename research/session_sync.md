@@ -1,6 +1,6 @@
 # Project: latest-VERL tau3 GRPO/SDPO fork
 
-Last Updated: 2026-05-13
+Last Updated: 2026-05-14
 
 ### Current Kiro/P5 Sync Rule
 
@@ -20,6 +20,7 @@ Last Updated: 2026-05-13
 - Final probe head before handoff: `7e0d09c1` (`Fail closed on hindsight probe controls`), rebased on `cb80e8fd`. Focused local verification: `23 passed`; `py_compile`, `git diff --check`, and ancestry check against stabilization passed.
 - Assumption-sensitive items intentionally left unchanged for later decision: official-gym zero-tool official success strict-fails by default, and critic weight-update counting was not changed without runtime evidence.
 - Kiro/P5 checked the old faithful run rollout dump and confirmed it is unusable for the controlled-hindsight probe: old rows lack top-level `uid`, `task_id`, and strict-action labels. Future stabilized dumps should be used instead. A follow-up provenance patch emits top-level `task_id` from the ground-truth JSON when it is not already present, while `uid` and strict-action labels come from the stabilized trainer/reward path.
+- Added same-UID homogeneity diagnostics for strict peer-only SDPO: per-step all-fail/all-success/mixed group metrics are logged for strict/training scores and official scores, and the trainer emits `[sdpo_same_uid_warning] no_mixed_strict_groups ...` when a batch has zero mixed same-UID groups. This is logging/QC only; it does not change reward, loss, skip behavior, dynamic sampling, teacher context, or rollout selection.
 
 ### 2026-05-13 Faithful Tau3 SDPO baseline cleanup
 

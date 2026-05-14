@@ -27,6 +27,7 @@ LOCAL_TEST_COMMANDS = [
     "tests/utils/test_tau3_length_metrics.py "
     "tests/utils/test_rollout_skip_on_cpu.py "
     "tests/utils/test_mlflow_key_sanitization.py "
+    "tests/utils/test_sdpo_same_uid_group_metrics.py "
     "tests/utils/test_sdpo_p1_stabilization_qc.py",
     "python scripts/tau3/sdpo_p1_stabilization_qc.py --help",
 ]
@@ -47,6 +48,7 @@ GATE_ORDER = [
     "mask_debug_sample_present",
     "checkpoint_saved_when_update_counter_changed",
     "early_skip_cause_logged",
+    "same_uid_homogeneity_metrics_present",
     "cuda_memory_phase_metrics_present",
     "teacher_scheduling_equivalence",
 ]
@@ -160,6 +162,35 @@ def gate_early_skip_cause(text: str) -> GateResult:
     return GateResult("early_skip_cause_logged", "FAIL", "missing early skip-cause metric or log line")
 
 
+def gate_same_uid_homogeneity(text: str, metric_keys: set[str]) -> GateResult:
+    found_metric = has_any_metric(
+        metric_keys,
+        [
+            r"self_distillation/same_uid_group_count$",
+            r"self_distillation/same_uid_strict_mixed_fraction$",
+            r"self_distillation/same_uid_mixed_fraction$",
+        ],
+    )
+    found_log = bool(
+        re.search(
+            r"same_uid_(strict_)?mixed_fraction|same_uid_group_count|sdpo_same_uid_warning",
+            text,
+            re.I,
+        )
+    )
+    if found_metric or found_log:
+        return GateResult(
+            "same_uid_homogeneity_metrics_present",
+            "PASS",
+            "found same-UID all-fail/all-success/mixed group evidence",
+        )
+    return GateResult(
+        "same_uid_homogeneity_metrics_present",
+        "FAIL",
+        "missing same-UID homogeneity metrics or no-mixed warning",
+    )
+
+
 def gate_cuda_memory_phases(text: str, metric_keys: set[str]) -> GateResult:
     missing = []
     for phase in CUDA_PHASES:
@@ -205,6 +236,7 @@ def evaluate_gates(
         gate_mask_debug_sample(text, mask_debug_enabled),
         gate_checkpoint_saved(text, update_counter_changed),
         gate_early_skip_cause(text),
+        gate_same_uid_homogeneity(text, metric_keys),
         gate_cuda_memory_phases(text, metric_keys),
         gate_teacher_scheduling(text, metric_keys, teacher_scheduling_enabled),
     ]
@@ -254,6 +286,7 @@ def report_template() -> str:
 - Mask-debug sample is required only when mask debug is enabled for the smoke.
 - Checkpoint-save evidence is required when the update counter changed.
 - Teacher scheduling equivalence is required only when teacher scheduling is enabled.
+- Same-UID homogeneity metrics should be present in every strict peer-only SDPO smoke.
 """
 
 

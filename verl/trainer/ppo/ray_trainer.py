@@ -53,6 +53,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
+from verl.trainer.ppo.sdpo_group_metrics import format_sdpo_same_uid_warning, sdpo_same_uid_group_metrics
 from verl.trainer.ppo.utils import (
     Role,
     WorkerType,
@@ -1866,6 +1867,27 @@ class RayPPOTrainer:
         if bool(env_error_mask.any().item()):
             failed_mask = failed_mask & ~env_error_mask
         failed_mask_list = failed_mask.detach().cpu().tolist()
+        uids = list(batch.non_tensor_batch.get("uid", []))
+        official_scores = None
+        if reward_extra_infos_dict:
+            official_scores = reward_extra_infos_dict.get("official_score")
+            if official_scores is None:
+                official_scores = reward_extra_infos_dict.get("tau3_live/official_score")
+        same_uid_metrics = sdpo_same_uid_group_metrics(
+            uids=uids,
+            strict_scores=seq_scores.detach().cpu().tolist(),
+            official_scores=official_scores,
+            eligible_mask=(~env_error_mask).detach().cpu().tolist(),
+            success_threshold=success_threshold,
+        )
+        warning = format_sdpo_same_uid_warning(step=int(self.global_steps), metrics=same_uid_metrics)
+        if warning is not None and os.environ.get("SDPO_WARN_NO_MIXED_SAME_UID", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            print(warning, flush=True)
         target_guard_cfg = sdpo_cfg.get("target_guard", {}) if sdpo_cfg is not None else {}
         _, demo_guard_masks = build_sdpo_target_guard_mask(
             response_mask=assistant_response_mask,
@@ -1884,7 +1906,6 @@ class RayPPOTrainer:
             if use_successful_peer_solution
             else {}
         )
-        uids = list(batch.non_tensor_batch.get("uid", []))
         solution_strs = (
             [
                 self._get_sdpo_solution(
@@ -1974,6 +1995,7 @@ class RayPPOTrainer:
                 "tau3_length/teacher_memory_tokens_mean": 0.0,
                 "tau3_length/teacher_component_decomposition_approx": 1.0,
             }
+            metrics.update(same_uid_metrics)
             metrics.update(length_metrics)
             return None, zeros, assistant_response_mask.to(dtype=torch.float32), metrics
 
@@ -2061,6 +2083,7 @@ class RayPPOTrainer:
             "tau3_length/teacher_memory_tokens_mean": 0.0,
             "tau3_length/teacher_component_decomposition_approx": 1.0,
         }
+        metrics.update(same_uid_metrics)
         metrics.update(length_metrics)
         selected = target_mask.to(torch.bool)
         selected_count = float(selected.float().sum().item())
