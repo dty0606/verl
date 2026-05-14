@@ -8,6 +8,18 @@ Last Updated: 2026-05-13
 - Do not tell Kiro/P5 to `git pull`, `git fetch`, or validate runtime code with `git log`/`git rev-parse`; the P5 runtime tree may intentionally exclude `.git`.
 - GitHub/private remotes are for local Codex history and optional archival review only, not the authoritative Kiro/P5 execution path.
 
+### 2026-05-14 Tau3 SDPO P1 stabilization and offline probe branches
+
+- Created sequential P1 branches from `codex/guarded-tau3-sdpo-baseline`: `codex/sdpo-p1-stabilization` first, then `codex/sdpo-p1-hindsight-probes` based on stabilization.
+- Stabilization branch scope is limited to approved P0/P1 guardrails: strict-action reward overlay/high-trust labels, mask/provenance debug dumps, checkpoint-if-weights-changed, early empty-target skip before expensive SDPO prework, CUDA memory phase metrics, and equivalent teacher-scheduling/tensor-lifetime hygiene.
+- Stabilization explicitly does **not** add dynamic sampling, live same-batch failed-peer hindsight, NL assertion feedback, historical rollout memory training, or synthetic feedback from truncation/max-step/parser heuristics.
+- Final stabilization head before handoff: `cb80e8fd` (`Fix duplicate strict-action counts`). Focused local verification: `17 passed` for strict-action, mask-debug, and stabilization QC tests; `py_compile` and `git diff --check` passed.
+- Probe branch is offline-only. It adds `scripts/tau3/sdpo_p1_hindsight_probe.py`, tests, and `research/sdpo_p1_hindsight_probe_runbook.md`; it must not alter reward, loss, skip behavior, checkpointing, or live teacher context.
+- Probe arms are `S_student`, `T0_original`, `T1_same_batch_hindsight`, `T2_random_hindsight`, `T3_raw_context_control`, plus optional `T4_strict_success_peer` and `T5_official_success_strict_fail`. `T6_nl_assertion_feedback` remains deferred as an external-feedback upper bound.
+- Probe gates now fail closed for missing strict labels, missing UID, missing different-task random control, missing `T3_raw_context_control` scores, mismatched scorer metadata, and missing drift labels.
+- Final probe head before handoff: `7e0d09c1` (`Fail closed on hindsight probe controls`), rebased on `cb80e8fd`. Focused local verification: `23 passed`; `py_compile`, `git diff --check`, and ancestry check against stabilization passed.
+- Assumption-sensitive items intentionally left unchanged for later decision: official-gym zero-tool official success strict-fails by default, and critic weight-update counting was not changed without runtime evidence.
+
 ### 2026-05-13 Faithful Tau3 SDPO baseline cleanup
 
 - Guarded baseline semantics are now **peer-only SDPO**: successful same-UID peer demonstrations are the only privileged teacher context.
