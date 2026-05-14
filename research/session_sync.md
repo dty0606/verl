@@ -19,6 +19,7 @@ Last Updated: 2026-05-13
 - Probe gates now fail closed for missing strict labels, missing UID, missing different-task random control, missing `T3_raw_context_control` scores, mismatched scorer metadata, and missing drift labels.
 - Final probe head before handoff: `7e0d09c1` (`Fail closed on hindsight probe controls`), rebased on `cb80e8fd`. Focused local verification: `23 passed`; `py_compile`, `git diff --check`, and ancestry check against stabilization passed.
 - Assumption-sensitive items intentionally left unchanged for later decision: official-gym zero-tool official success strict-fails by default, and critic weight-update counting was not changed without runtime evidence.
+- Kiro/P5 checked the old faithful run rollout dump and confirmed it is unusable for the controlled-hindsight probe: old rows lack top-level `uid`, `task_id`, and strict-action labels. Future stabilized dumps should be used instead. A follow-up provenance patch emits top-level `task_id` from the ground-truth JSON when it is not already present, while `uid` and strict-action labels come from the stabilized trainer/reward path.
 
 ### 2026-05-13 Faithful Tau3 SDPO baseline cleanup
 

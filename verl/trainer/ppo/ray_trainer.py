@@ -439,6 +439,23 @@ class RayPPOTrainer:
         print(f"Dumped generations to {filename}")
 
     @staticmethod
+    def _task_ids_from_ground_truths(gts) -> list[str]:
+        task_ids: list[str] = []
+        for item in gts:
+            payload = item
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = {}
+            if isinstance(payload, dict):
+                task_id = payload.get("id", payload.get("task_id", ""))
+            else:
+                task_id = ""
+            task_ids.append("" if task_id is None else str(task_id))
+        return task_ids
+
+    @staticmethod
     def _sdpo_length_stats(batch: DataProto, key: str) -> dict[str, float]:
         if key not in batch.batch.keys():
             return {}
@@ -517,6 +534,10 @@ class RayPPOTrainer:
                         key,
                         values.tolist() if hasattr(values, "tolist") else list(values),
                     )
+            if "task_id" not in reward_extra_infos_to_dump and "tau3_task_id" not in reward_extra_infos_to_dump:
+                task_ids = self._task_ids_from_ground_truths(sample_gts)
+                if len(task_ids) == len(sample_gts) and any(task_ids):
+                    reward_extra_infos_to_dump["task_id"] = task_ids
 
             self._dump_generations(
                 inputs=inputs,
