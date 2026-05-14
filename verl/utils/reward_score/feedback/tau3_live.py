@@ -83,23 +83,18 @@ def _executed_tool_names(live_result: dict[str, Any]) -> list[str]:
         name = _tool_name(item)
         if name:
             names.append(name)
+    if names:
+        return names
 
-    # Some summaries include richer tool events. Only count successful events
-    # for strict reward evidence, matching Tau3GymLiveSession.executed_tools.
+    # Some summaries include richer tool events instead of executed_tools. Only
+    # count successful events for strict reward evidence.
     for event in live_result.get("tool_events") or []:
         if not isinstance(event, dict) or event.get("success") is False:
             continue
         name = _tool_name(event)
         if name:
             names.append(name)
-
-    seen: set[str] = set()
-    unique_names: list[str] = []
-    for name in names:
-        if name not in seen:
-            seen.add(name)
-            unique_names.append(name)
-    return unique_names
+    return names
 
 
 def _expected_action_names(parsed_ground_truth: dict[str, Any], live_result: dict[str, Any]) -> list[str]:

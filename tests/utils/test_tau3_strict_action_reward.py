@@ -183,6 +183,32 @@ def test_duplicate_expected_actions_require_duplicate_tool_executions(monkeypatc
     assert result["tau3_live/strict_action_violation_fraction"] == 1.0
 
 
+def test_duplicate_expected_actions_pass_with_duplicate_tool_executions(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TAU3_STRICT_ACTION_REWARD", raising=False)
+
+    result = tau3_live.compute_score(
+        solution_str="Done.",
+        ground_truth={
+            "label": "success",
+            "expected_actions": [{"name": "get_reservation_details"}, {"name": "get_reservation_details"}],
+        },
+        extra_info={
+            "tau3_live_result": {
+                "runtime": "official_gym",
+                "status": "terminated",
+                "terminal_reason": "user_stop",
+                "final_reward": 1.0,
+                "executed_tools": ["get_reservation_details", "get_reservation_details"],
+                "latest_assistant_message": "Done.",
+            }
+        },
+    )
+
+    assert result["score"] == 1.0
+    assert result["tau3_live/strict_expected_action_count"] == 2.0
+    assert result["tau3_live/strict_action_violation_fraction"] == 0.0
+
+
 def test_strict_action_reward_env_toggle_controls_official_gym_default(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("TAU3_STRICT_ACTION_REWARD", raising=False)
     assert _score(executed_tools=[])["score"] == 0.0
