@@ -105,6 +105,8 @@ def test_report_template_contains_global_safety_rules():
     template = qc.report_template()
 
     assert "No dynamic sampling" in template
-    assert "No live cross-rollout context" in template
+    assert "No new live hindsight context" in template
     assert "No NL assertion" in template
     assert "No synthetic feedback" in template
+    assert "test_tau3_strict_action_reward.py" in template
+    assert "test_tau3_sdpo_mask_debug.py" in template

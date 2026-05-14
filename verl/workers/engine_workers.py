@@ -74,7 +74,7 @@ def _sdpo_ema_finite_check_enabled() -> bool:
 
 
 def _sdpo_ema_aggressive_empty_cache_enabled() -> bool:
-    return _env_flag("SDPO_EMA_AGGRESSIVE_EMPTY_CACHE")
+    return _env_flag("SDPO_EMA_AGGRESSIVE_EMPTY_CACHE", default=True)
 
 
 def _is_vision_tower_param_name(name: str) -> bool:

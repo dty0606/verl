@@ -68,7 +68,7 @@ def test_strict_action_overlay_zeroes_official_success_when_expected_action_miss
     assert result["tau3_live/strict_action_required_fraction"] == 1.0
     assert result["tau3_live/strict_action_violation_fraction"] == 1.0
     assert result["tau3_live/official_success_strict_override_fraction"] == 1.0
-    assert result["feedback"] == "Strict training reward failed due to strict action violation."
+    assert result["feedback"] == ""
 
 
 def test_strict_action_overlay_preserves_official_success_when_expected_action_executed(
@@ -108,6 +108,79 @@ def test_fake_transfer_marker_without_transfer_tool_is_strict_violation(monkeypa
     assert result["tau3_live/transfer_marker_without_tool_fraction"] == 1.0
     assert result["tau3_live/strict_action_check_count"] == 1.0
     assert result["tau3_live/official_success_zero_tool_fraction"] == 1.0
+
+
+def test_fake_connect_human_agent_marker_is_strict_violation(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TAU3_STRICT_ACTION_REWARD", raising=False)
+
+    result = tau3_live.compute_score(
+        solution_str="I will connect you with a human agent now.",
+        ground_truth={"label": "success"},
+        extra_info={
+            "tau3_live_result": {
+                "runtime": "official_gym",
+                "status": "terminated",
+                "terminal_reason": "user_stop",
+                "final_reward": 1.0,
+                "executed_tools": [],
+                "latest_assistant_message": "I will connect you with a human agent now.",
+            }
+        },
+    )
+
+    assert result["score"] == 0.0
+    assert result["feedback"] == ""
+    assert result["tau3_live/transfer_marker_without_tool_fraction"] == 1.0
+
+
+def test_official_success_without_expected_actions_or_tools_is_not_high_trust(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TAU3_STRICT_ACTION_REWARD", raising=False)
+
+    result = tau3_live.compute_score(
+        solution_str="Done.",
+        ground_truth={"label": "success"},
+        extra_info={
+            "tau3_live_result": {
+                "runtime": "official_gym",
+                "status": "terminated",
+                "terminal_reason": "user_stop",
+                "final_reward": 1.0,
+                "executed_tools": [],
+                "latest_assistant_message": "Done.",
+            }
+        },
+    )
+
+    assert result["score"] == 0.0
+    assert result["tau3_live/strict_action_required_fraction"] == 1.0
+    assert result["tau3_live/strict_action_pass_fraction"] == 0.0
+    assert result["tau3_live/strict_action_high_trust_success_fraction"] == 0.0
+
+
+def test_duplicate_expected_actions_require_duplicate_tool_executions(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TAU3_STRICT_ACTION_REWARD", raising=False)
+
+    result = tau3_live.compute_score(
+        solution_str="Done.",
+        ground_truth={
+            "label": "success",
+            "expected_actions": [{"name": "get_reservation_details"}, {"name": "get_reservation_details"}],
+        },
+        extra_info={
+            "tau3_live_result": {
+                "runtime": "official_gym",
+                "status": "terminated",
+                "terminal_reason": "user_stop",
+                "final_reward": 1.0,
+                "executed_tools": ["get_reservation_details"],
+                "latest_assistant_message": "Done.",
+            }
+        },
+    )
+
+    assert result["score"] == 0.0
+    assert result["tau3_live/strict_expected_action_count"] == 2.0
+    assert result["tau3_live/strict_action_violation_fraction"] == 1.0
 
 
 def test_strict_action_reward_env_toggle_controls_official_gym_default(monkeypatch: pytest.MonkeyPatch):

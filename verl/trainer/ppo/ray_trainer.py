@@ -510,11 +510,13 @@ class RayPPOTrainer:
             reward_extra_infos_to_dump = {
                 k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in reward_extra_infos_dict.items()
             }
-            if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_dict.setdefault(
-                    "request_id",
-                    batch.non_tensor_batch["request_id"].tolist(),
-                )
+            for key in ("uid", "task_id", "tau3_task_id", "request_id"):
+                if key in batch.non_tensor_batch:
+                    values = batch.non_tensor_batch[key]
+                    reward_extra_infos_to_dump.setdefault(
+                        key,
+                        values.tolist() if hasattr(values, "tolist") else list(values),
+                    )
 
             self._dump_generations(
                 inputs=inputs,
@@ -552,19 +554,27 @@ class RayPPOTrainer:
         os.makedirs(dump_dir, exist_ok=True)
 
         with marked_timer("dump_sdpo_mask_debug", timing_raw, color="green"):
-            preview_chars = int(debug_cfg.get("preview_chars", 160))
-            max_rows = int(debug_cfg.get("max_rows_per_step", 8))
-            max_spans = int(debug_cfg.get("max_spans_per_row", 8))
+            try:
+                preview_chars = max(0, int(debug_cfg.get("preview_chars", 160)))
+                max_rows = max(0, int(debug_cfg.get("max_rows_per_step", 8)))
+                max_spans = max(0, int(debug_cfg.get("max_spans_per_row", 8)))
+            except (TypeError, ValueError):
+                preview_chars, max_rows, max_spans = 160, 8, 8
 
             prompts = batch.batch["prompts"]
             responses = batch.batch["responses"]
+            row_count = min(max_rows, int(prompts.shape[0]), int(responses.shape[0]))
+            if row_count <= 0:
+                return
+            prompts = prompts[:row_count]
+            responses = responses[:row_count]
             prompt_texts = self.tokenizer.batch_decode(prompts, skip_special_tokens=True)
             response_texts = self.tokenizer.batch_decode(responses, skip_special_tokens=True)
             response_token_texts = [
                 self.tokenizer.convert_ids_to_tokens(row.detach().cpu().tolist(), skip_special_tokens=False)
                 for row in responses
             ]
-            prompt_attention_mask = batch.batch["attention_mask"][:, : prompts.shape[-1]]
+            prompt_attention_mask = batch.batch["attention_mask"][:row_count, : prompts.shape[-1]]
             prompt_token_counts = prompt_attention_mask.sum(dim=-1)
             task_ids = None
             for key in ("task_id", "task_ids", "tau3_task_id"):
@@ -575,10 +585,10 @@ class RayPPOTrainer:
             rows = build_tau3_sdpo_mask_debug_rows(
                 prompt_texts=prompt_texts[:max_rows],
                 response_texts=response_texts[:max_rows],
-                response_mask=batch.batch["response_mask"][:max_rows],
+                response_mask=batch.batch["response_mask"][:row_count],
                 self_distillation_loss_mask=batch.batch.get("self_distillation_loss_mask", None),
                 self_distillation_target_token_mask=batch.batch.get("self_distillation_target_token_mask", None),
-                reward_tensor=reward_tensor[:max_rows],
+                reward_tensor=reward_tensor[:row_count],
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 uids=batch.non_tensor_batch.get("uid", None),
                 task_ids=task_ids,
@@ -589,9 +599,14 @@ class RayPPOTrainer:
             )
 
             path = os.path.join(dump_dir, f"step_{int(self.global_steps):06d}.jsonl")
-            with open(path, "w", encoding="utf-8") as f:
-                for row in rows:
-                    f.write(json.dumps(row, ensure_ascii=True, sort_keys=True, default=str) + "\n")
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row, ensure_ascii=True, sort_keys=True, default=str) + "\n")
+            except Exception as exc:
+                if bool(debug_cfg.get("strict", False)):
+                    raise
+                print(f"[sdpo_mask_debug_warning] failed to write {path}: {exc}", flush=True)
 
     @staticmethod
     def _reward_extra_scalar_metrics(reward_extra_infos_dict: dict[str, list]) -> dict[str, float]:
@@ -1569,6 +1584,21 @@ class RayPPOTrainer:
                 if values:
                     metrics[f"self_distillation/ema_teacher_{key}_mean"] = float(np.mean(values))
                     metrics[f"self_distillation/ema_teacher_{key}_max"] = float(np.max(values))
+            cuda_metric_values: dict[str, list[float]] = defaultdict(list)
+            for item in worker_metrics:
+                if not isinstance(item, dict):
+                    continue
+                for key, value in item.items():
+                    if not str(key).startswith("cuda_memory/"):
+                        continue
+                    try:
+                        cuda_metric_values[str(key)].append(float(value))
+                    except (TypeError, ValueError):
+                        continue
+            for key, values in cuda_metric_values.items():
+                if values:
+                    metrics[f"{key}/mean"] = float(np.mean(values))
+                    metrics[f"{key}/max"] = float(np.max(values))
         return metrics
 
     def _update_actor(self, batch: DataProto) -> DataProto:
@@ -2196,7 +2226,9 @@ class RayPPOTrainer:
 
         self.global_steps = 0
         self._actor_update_count = 0
+        self._weight_update_count = 0
         self._last_checkpoint_actor_update_count = 0
+        self._last_checkpoint_weight_update_count = 0
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
@@ -2399,8 +2431,10 @@ class RayPPOTrainer:
                     #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-                    if skip_actor_update_due_empty_sdpo:
-                        metrics["actor/old_log_prob_skipped_empty_sdpo_target"] = 1.0
+                    skip_expensive_update_prework = skip_actor_update_due_env_error or skip_actor_update_due_empty_sdpo
+                    if skip_expensive_update_prework:
+                        metrics["actor/old_log_prob_skipped_empty_sdpo_target"] = float(skip_actor_update_due_empty_sdpo)
+                        metrics["actor/old_log_prob_skipped_env_error"] = float(skip_actor_update_due_env_error)
                     elif bypass_recomputing_logprobs:  # Use `rollout_log_probs`
                         from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
@@ -2449,10 +2483,10 @@ class RayPPOTrainer:
 
                                 metrics.update(calculate_debug_metrics(batch))
 
-                    if not skip_actor_update_due_empty_sdpo:
+                    if not skip_expensive_update_prework:
                         assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    if not skip_actor_update_due_empty_sdpo:
+                    if not skip_expensive_update_prework:
                         with marked_timer("sdpo_teacher", timing_raw, color="purple"):
                             batch, sdpo_metrics = self._maybe_add_sdpo_teacher_logprobs(
                                 batch,
@@ -2469,19 +2503,19 @@ class RayPPOTrainer:
                                     skip_actor_update_due_empty_sdpo
                                 )
 
-                    if self.use_reference_policy and not skip_actor_update_due_empty_sdpo:
+                    if self.use_reference_policy and not skip_expensive_update_prework:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
                     # compute values
-                    if self.use_critic and not skip_actor_update_due_empty_sdpo:
+                    if self.use_critic and not skip_expensive_update_prework:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self._compute_values(batch)
                             batch = batch.union(values)
 
-                    if not skip_actor_update_due_empty_sdpo:
+                    if not skip_expensive_update_prework:
                         with marked_timer("adv", timing_raw, color="brown"):
                             # we combine with rule-based rm
                             reward_extra_infos_dict: dict[str, list]
@@ -2547,6 +2581,7 @@ class RayPPOTrainer:
                         if self.use_critic:
                             batch.batch["values"] = placeholder
                         metrics["self_distillation/placeholder_metrics_empty_target"] = 1.0
+                        metrics["trainer/placeholder_metrics_env_error"] = float(skip_actor_update_due_env_error)
 
                     # update critic
                     if self.use_critic and (skip_actor_update_due_env_error or skip_actor_update_due_empty_sdpo):
@@ -2557,6 +2592,7 @@ class RayPPOTrainer:
                             critic_output = self._update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
+                        self._weight_update_count += 1
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup > self.global_steps:
@@ -2614,6 +2650,7 @@ class RayPPOTrainer:
                             with marked_timer("sdpo_ema_teacher", timing_raw, color="purple"):
                                 metrics.update(self._maybe_update_sdpo_ema_teacher())
                             self._actor_update_count += 1
+                            self._weight_update_count += 1
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
@@ -2624,6 +2661,10 @@ class RayPPOTrainer:
                     metrics["trainer/actor_update_count"] = float(self._actor_update_count)
                     metrics["trainer/actor_updates_since_last_checkpoint"] = float(
                         self._actor_update_count - self._last_checkpoint_actor_update_count
+                    )
+                    metrics["trainer/weight_update_count"] = float(self._weight_update_count)
+                    metrics["trainer/weight_updates_since_last_checkpoint"] = float(
+                        self._weight_update_count - self._last_checkpoint_weight_update_count
                     )
                     # Checkpoint on scheduled boundaries if any actor step
                     # changed weights since the previous checkpoint. This
@@ -2639,7 +2680,7 @@ class RayPPOTrainer:
                         or esi_close_to_expiration
                     )
                     weights_changed_since_checkpoint = (
-                        self._actor_update_count > self._last_checkpoint_actor_update_count
+                        self._weight_update_count > self._last_checkpoint_weight_update_count
                     )
                     metrics["trainer/checkpoint_due"] = float(checkpoint_due)
                     metrics["trainer/checkpoint_weights_changed_since_last"] = float(weights_changed_since_checkpoint)
@@ -2649,6 +2690,7 @@ class RayPPOTrainer:
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
                         self._last_checkpoint_actor_update_count = self._actor_update_count
+                        self._last_checkpoint_weight_update_count = self._weight_update_count
                         metrics["trainer/checkpoint_saved_weights_changed"] = 1.0
                     elif checkpoint_due:
                         metrics["trainer/checkpoint_skipped_no_weight_change"] = 1.0
@@ -2657,7 +2699,17 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
-                    self._log_sdpo_mask_debug(batch, reward_tensor, reward_extra_infos_dict, timing_raw)
+                    try:
+                        self._log_sdpo_mask_debug(batch, reward_tensor, reward_extra_infos_dict, timing_raw)
+                    except Exception as exc:
+                        if os.environ.get("TAU3_SDPO_MASK_DEBUG_STRICT", "0").strip().lower() in {
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        }:
+                            raise
+                        print(f"[sdpo_mask_debug_warning] debug dump failed: {exc}", flush=True)
 
                 # validate
                 if self.config.trainer.test_freq > 0 and (

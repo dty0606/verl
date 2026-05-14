@@ -25,6 +25,7 @@ TRANSFER_TOOL_NAME = "transfer_to_human_agents"
 TRANSFER_TEXT_MARKER_PATTERNS = [
     r"\btransfer_to_human_agents\b",
     r"\btransfer(?:red|ring)?\s+(?:you\s+)?to\s+(?:a\s+)?human\s+agent[s]?\b",
+    r"\bconnect(?:ed|ing)?\s+(?:you\s+)?(?:with|to)\s+(?:a\s+)?human\s+agent[s]?\b",
     r"\bhuman\s+agent[s]?\s+(?:will|can)\s+(?:assist|help|take over)\b",
 ]
 
@@ -130,16 +131,30 @@ def _strict_action_reward_qc(
 ) -> dict[str, float | bool | str]:
     enabled = _strict_action_overlay_enabled(runtime=runtime)
     executed_tools = _executed_tool_names(live_result)
-    executed_set = set(executed_tools)
     expected_actions = _expected_action_names(parsed_ground_truth, live_result)
-    missing_expected = [name for name in expected_actions if name not in executed_set]
-    transfer_marker_without_tool = _has_transfer_text_marker(final_assistant) and TRANSFER_TOOL_NAME not in executed_set
+    executed_counts: dict[str, int] = {}
+    for name in executed_tools:
+        executed_counts[name] = executed_counts.get(name, 0) + 1
 
-    strict_required = bool(expected_actions or transfer_marker_without_tool)
+    missing_expected: list[str] = []
+    required_counts: dict[str, int] = {}
+    for name in expected_actions:
+        required_counts[name] = required_counts.get(name, 0) + 1
+    for name, required_count in required_counts.items():
+        executed_count = executed_counts.get(name, 0)
+        if executed_count < required_count:
+            missing_expected.extend([name] * (required_count - executed_count))
+
+    transfer_marker_without_tool = _has_transfer_text_marker(final_assistant) and executed_counts.get(TRANSFER_TOOL_NAME, 0) <= 0
+    official_success = float(official_score) > 0.0
+    zero_tool_official_success = official_success and not executed_tools
+
+    strict_required = bool(expected_actions or transfer_marker_without_tool or zero_tool_official_success)
     strict_pass = (not missing_expected) and not transfer_marker_without_tool
+    if zero_tool_official_success:
+        strict_pass = False
     violation = enabled and strict_required and not strict_pass
     strict_score = 0.0 if violation else float(official_score)
-    official_success = float(official_score) > 0.0
 
     return {
         "enabled": enabled,
@@ -150,7 +165,7 @@ def _strict_action_reward_qc(
         "expected_action_count": float(len(expected_actions)),
         "check_count": float(len(expected_actions) + (1 if transfer_marker_without_tool else 0)),
         "transfer_marker_without_tool": transfer_marker_without_tool,
-        "official_success_zero_tool": official_success and not executed_tools,
+        "official_success_zero_tool": zero_tool_official_success,
         "official_success_strict_override": official_success and violation,
         "high_trust_success": official_success and enabled and strict_pass,
         "missing_expected_actions": ",".join(missing_expected),
@@ -299,10 +314,6 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         runtime=runtime,
     )
     training_reward = float(strict_qc["strict_score"])
-    if strict_qc["official_success_strict_override"]:
-        strict_feedback = "Strict training reward failed due to strict action violation."
-        feedback = f"{feedback}\n{strict_feedback}".strip() if feedback else strict_feedback
-
     terminal = float(_is_terminal_live_result(live_result))
     terminal_reason = str(live_result.get("terminal_reason") or "").lower()
     env_error = float(_is_env_error_live_result(live_result))

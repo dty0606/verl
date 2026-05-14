@@ -21,6 +21,8 @@ from typing import Any
 LOCAL_TEST_COMMANDS = [
     "python -m pytest tests/utils/test_tau3_sdpo_full_logit_loss.py "
     "tests/utils/test_tau3_sdpo_ema_teacher.py "
+    "tests/utils/test_tau3_strict_action_reward.py "
+    "tests/utils/test_tau3_sdpo_mask_debug.py "
     "tests/utils/test_tau3_faithful_sdpo_config.py "
     "tests/utils/test_tau3_length_metrics.py "
     "tests/utils/test_rollout_skip_on_cpu.py "
@@ -162,8 +164,8 @@ def gate_cuda_memory_phases(text: str, metric_keys: set[str]) -> GateResult:
     missing = []
     for phase in CUDA_PHASES:
         phase_in_log = bool(re.search(r"\[sdpo_cuda_memory\].*" + re.escape(phase), text))
-        phase_metric = has_any_metric(metric_keys, [r"(^|/)cuda_memory/(before_|after_|peak_)"])
-        if not phase_in_log and not (phase == "actor_update" and phase_metric):
+        phase_metric = has_any_metric(metric_keys, [rf"(^|/)cuda_memory/{re.escape(phase)}/"])
+        if not phase_in_log and not phase_metric:
             missing.append(phase)
     if not missing:
         return GateResult("cuda_memory_phase_metrics_present", "PASS", "found CUDA memory evidence for required phases")
@@ -222,8 +224,8 @@ def report_template() -> str:
 
 ## Scope
 - Branch: `codex/sdpo-p1-stabilization`
-- Harness only: no trainer/reward/worker semantics changed.
-- Smoke target: P1 stabilization on P5 with faithful peer-only SDPO.
+- Approved stabilization changes only: strict reward overlay, skip/checkpoint control flow, diagnostics, and QC hooks.
+- Smoke target: P1 stabilization on P5 with strict peer-only SDPO.
 
 ## Local One-Command Test Set
 {commands}
@@ -238,7 +240,7 @@ def report_template() -> str:
 
 ## Global Safety Sign-Off
 - [ ] No dynamic sampling.
-- [ ] No live cross-rollout context.
+- [ ] No new live hindsight context beyond the strict successful-peer SDPO baseline.
 - [ ] No NL assertion.
 - [ ] No synthetic feedback.
 

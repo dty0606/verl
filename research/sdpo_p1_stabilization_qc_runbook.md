@@ -1,8 +1,8 @@
 # Tau3 SDPO P1 Stabilization QC Runbook
 
-This is a harness/checklist only. It does not change training semantics and must
-not be used to justify dynamic sampling, live cross-rollout context, NL
-assertions, or synthetic feedback.
+This is the checklist for the approved P1 stabilization changes. It must not be
+used to justify dynamic sampling, new live hindsight context beyond the strict
+successful-peer SDPO baseline, NL assertions, or synthetic feedback.
 
 ## Local One-Command Test Set
 
@@ -10,6 +10,7 @@ Run from the repo root:
 
 ```bash
 python -m pytest tests/utils/test_tau3_sdpo_full_logit_loss.py tests/utils/test_tau3_sdpo_ema_teacher.py tests/utils/test_tau3_faithful_sdpo_config.py tests/utils/test_tau3_length_metrics.py tests/utils/test_rollout_skip_on_cpu.py tests/utils/test_mlflow_key_sanitization.py tests/utils/test_sdpo_p1_stabilization_qc.py
+python -m pytest tests/utils/test_tau3_strict_action_reward.py tests/utils/test_tau3_sdpo_mask_debug.py
 python scripts/tau3/sdpo_p1_stabilization_qc.py --help
 ```
 
@@ -67,8 +68,8 @@ teacher scheduling/equivalence path.
 
 ## Scope
 - Branch: `codex/sdpo-p1-stabilization`
-- Harness only: no trainer/reward/worker semantics changed.
-- Smoke target: P1 stabilization on P5 with faithful peer-only SDPO.
+- Approved stabilization changes only: strict reward overlay, skip/checkpoint control flow, diagnostics, and QC hooks.
+- Smoke target: P1 stabilization on P5 with strict peer-only SDPO.
 
 ## Local Tests
 - Command:
@@ -92,7 +93,7 @@ teacher scheduling/equivalence path.
 
 ## Global Safety Sign-Off
 - [ ] No dynamic sampling.
-- [ ] No live cross-rollout context.
+- [ ] No new live hindsight context beyond the strict successful-peer SDPO baseline.
 - [ ] No NL assertion.
 - [ ] No synthetic feedback.
 
