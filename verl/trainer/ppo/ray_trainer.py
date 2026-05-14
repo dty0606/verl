@@ -74,6 +74,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tau3_sdpo_target_guard import build_sdpo_target_guard_mask
+from verl.utils.tau3_sdpo_mask_debug import build_tau3_sdpo_mask_debug_rows
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
@@ -523,6 +524,74 @@ class RayPPOTrainer:
                 reward_extra_infos_dict=reward_extra_infos_to_dump,
                 dump_path=rollout_data_dir,
             )
+
+    def _log_sdpo_mask_debug(
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_extra_infos_dict: dict,
+        timing_raw: dict,
+    ) -> None:
+        """Write compact SDPO mask/provenance rows when explicitly enabled."""
+
+        sdpo_cfg = self.config.get("tau3", {}).get("sdpo", {}) or {}
+        debug_cfg = sdpo_cfg.get("mask_debug", {}) or {}
+        env_enabled = os.environ.get("TAU3_SDPO_MASK_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+        enabled = bool(debug_cfg.get("enabled", False)) or env_enabled
+        if not enabled:
+            return
+
+        dump_dir = (
+            os.environ.get("TAU3_SDPO_MASK_DEBUG_DIR")
+            or debug_cfg.get("dump_dir")
+            or self.config.trainer.get("rollout_data_dir", None)
+        )
+        if not dump_dir:
+            return
+        dump_dir = os.path.join(str(dump_dir), "sdpo_mask_debug")
+        os.makedirs(dump_dir, exist_ok=True)
+
+        with marked_timer("dump_sdpo_mask_debug", timing_raw, color="green"):
+            preview_chars = int(debug_cfg.get("preview_chars", 160))
+            max_rows = int(debug_cfg.get("max_rows_per_step", 8))
+            max_spans = int(debug_cfg.get("max_spans_per_row", 8))
+
+            prompts = batch.batch["prompts"]
+            responses = batch.batch["responses"]
+            prompt_texts = self.tokenizer.batch_decode(prompts, skip_special_tokens=True)
+            response_texts = self.tokenizer.batch_decode(responses, skip_special_tokens=True)
+            response_token_texts = [
+                self.tokenizer.convert_ids_to_tokens(row.detach().cpu().tolist(), skip_special_tokens=False)
+                for row in responses
+            ]
+            prompt_attention_mask = batch.batch["attention_mask"][:, : prompts.shape[-1]]
+            prompt_token_counts = prompt_attention_mask.sum(dim=-1)
+            task_ids = None
+            for key in ("task_id", "task_ids", "tau3_task_id"):
+                if key in batch.non_tensor_batch:
+                    task_ids = batch.non_tensor_batch[key]
+                    break
+
+            rows = build_tau3_sdpo_mask_debug_rows(
+                prompt_texts=prompt_texts[:max_rows],
+                response_texts=response_texts[:max_rows],
+                response_mask=batch.batch["response_mask"][:max_rows],
+                self_distillation_loss_mask=batch.batch.get("self_distillation_loss_mask", None),
+                self_distillation_target_token_mask=batch.batch.get("self_distillation_target_token_mask", None),
+                reward_tensor=reward_tensor[:max_rows],
+                reward_extra_infos_dict=reward_extra_infos_dict,
+                uids=batch.non_tensor_batch.get("uid", None),
+                task_ids=task_ids,
+                response_token_texts=response_token_texts[:max_rows],
+                prompt_token_counts=prompt_token_counts[:max_rows],
+                preview_chars=preview_chars,
+                max_spans=max_spans,
+            )
+
+            path = os.path.join(dump_dir, f"step_{int(self.global_steps):06d}.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row, ensure_ascii=True, sort_keys=True, default=str) + "\n")
 
     @staticmethod
     def _reward_extra_scalar_metrics(reward_extra_infos_dict: dict[str, list]) -> dict[str, float]:
@@ -1981,8 +2050,10 @@ class RayPPOTrainer:
         batch: DataProto,
         reward_tensor: torch.Tensor,
         reward_extra_infos_dict: Optional[dict[str, list]] = None,
+        teacher_result: Optional[tuple[Optional[DataProto], torch.Tensor, torch.Tensor, dict[str, float]]] = None,
     ) -> tuple[DataProto, dict[str, float]]:
-        teacher_result = self._maybe_build_sdpo_teacher_batch(batch, reward_tensor, reward_extra_infos_dict)
+        if teacher_result is None:
+            teacher_result = self._maybe_build_sdpo_teacher_batch(batch, reward_tensor, reward_extra_infos_dict)
         if teacher_result is None:
             return batch, {}
 
@@ -2124,6 +2195,8 @@ class RayPPOTrainer:
         )
 
         self.global_steps = 0
+        self._actor_update_count = 0
+        self._last_checkpoint_actor_update_count = 0
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
@@ -2291,6 +2364,34 @@ class RayPPOTrainer:
                         env_error_skip_threshold = 0.25
                     skip_actor_update_due_env_error = env_error_fraction >= env_error_skip_threshold > 0.0
                     metrics["tau3_live/env_error_skip_update"] = float(skip_actor_update_due_env_error)
+                    batch.batch["token_level_scores"] = reward_tensor
+                    if reward_extra_infos_dict:
+                        batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                        metrics.update(self._reward_extra_scalar_metrics(reward_extra_infos_dict))
+
+                    skip_actor_update_due_empty_sdpo = False
+                    sdpo_teacher_result = None
+                    if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") == "sdpo":
+                        with marked_timer("sdpo_target_preflight", timing_raw, color="purple"):
+                            sdpo_teacher_result = self._maybe_build_sdpo_teacher_batch(
+                                batch, reward_tensor, reward_extra_infos_dict
+                            )
+                        if sdpo_teacher_result is not None:
+                            _, target_mask, target_loss_mask, sdpo_preflight_metrics = sdpo_teacher_result
+                            target_token_mask = target_loss_mask * target_mask.unsqueeze(1)
+                            batch.batch["self_distillation_mask"] = target_mask
+                            batch.batch["self_distillation_loss_mask"] = target_loss_mask
+                            batch.batch["self_distillation_target_token_mask"] = target_token_mask
+                            metrics.update(sdpo_preflight_metrics)
+                            skip_actor_update_due_empty_sdpo = float(target_token_mask.sum().item()) <= 0.0
+                            metrics["self_distillation/empty_target_update_skipped"] = float(
+                                skip_actor_update_due_empty_sdpo
+                            )
+                            metrics["self_distillation/metadata_preflight_empty_target"] = float(
+                                skip_actor_update_due_empty_sdpo
+                            )
+                            if skip_actor_update_due_empty_sdpo:
+                                metrics["self_distillation/teacher_infer_skipped_empty_guarded_batch"] = 1.0
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -2298,7 +2399,9 @@ class RayPPOTrainer:
                     #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-                    if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+                    if skip_actor_update_due_empty_sdpo:
+                        metrics["actor/old_log_prob_skipped_empty_sdpo_target"] = 1.0
+                    elif bypass_recomputing_logprobs:  # Use `rollout_log_probs`
                         from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
                         apply_bypass_mode(
@@ -2346,81 +2449,104 @@ class RayPPOTrainer:
 
                                 metrics.update(calculate_debug_metrics(batch))
 
-                    assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                    if not skip_actor_update_due_empty_sdpo:
+                        assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    with marked_timer("sdpo_teacher", timing_raw, color="purple"):
-                        batch, sdpo_metrics = self._maybe_add_sdpo_teacher_logprobs(
-                            batch, reward_tensor, reward_extra_infos_dict
-                        )
-                        metrics.update(sdpo_metrics)
-                    skip_actor_update_due_empty_sdpo = False
-                    if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") == "sdpo":
-                        sdpo_target_token_mask = batch.batch.get("self_distillation_target_token_mask", None)
-                        if sdpo_target_token_mask is not None:
-                            skip_actor_update_due_empty_sdpo = float(sdpo_target_token_mask.sum().item()) <= 0.0
-                            metrics["self_distillation/empty_target_update_skipped"] = float(
-                                skip_actor_update_due_empty_sdpo
+                    if not skip_actor_update_due_empty_sdpo:
+                        with marked_timer("sdpo_teacher", timing_raw, color="purple"):
+                            batch, sdpo_metrics = self._maybe_add_sdpo_teacher_logprobs(
+                                batch,
+                                reward_tensor,
+                                reward_extra_infos_dict,
+                                teacher_result=sdpo_teacher_result,
                             )
+                            metrics.update(sdpo_metrics)
+                        if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") == "sdpo":
+                            sdpo_target_token_mask = batch.batch.get("self_distillation_target_token_mask", None)
+                            if sdpo_target_token_mask is not None:
+                                skip_actor_update_due_empty_sdpo = float(sdpo_target_token_mask.sum().item()) <= 0.0
+                                metrics["self_distillation/empty_target_update_skipped"] = float(
+                                    skip_actor_update_due_empty_sdpo
+                                )
 
-                    if self.use_reference_policy:
+                    if self.use_reference_policy and not skip_actor_update_due_empty_sdpo:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
                     # compute values
-                    if self.use_critic:
+                    if self.use_critic and not skip_actor_update_due_empty_sdpo:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self._compute_values(batch)
                             batch = batch.union(values)
 
-                    with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        batch.batch["token_level_scores"] = reward_tensor
+                    if not skip_actor_update_due_empty_sdpo:
+                        with marked_timer("adv", timing_raw, color="brown"):
+                            # we combine with rule-based rm
+                            reward_extra_infos_dict: dict[str, list]
+                            batch.batch["token_level_scores"] = reward_tensor
 
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-                            metrics.update(self._reward_extra_scalar_metrics(reward_extra_infos_dict))
+                            if reward_extra_infos_dict:
+                                batch.non_tensor_batch.update(
+                                    {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                                )
+                                metrics.update(self._reward_extra_scalar_metrics(reward_extra_infos_dict))
 
-                        # compute rewards. apply_kl_penalty if available
-                        if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(
-                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                            # compute rewards. apply_kl_penalty if available
+                            if self.config.algorithm.use_kl_in_reward:
+                                batch, kl_metrics = apply_kl_penalty(
+                                    batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                                )
+                                metrics.update(kl_metrics)
+                            else:
+                                batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                            # Compute rollout correction: IS weights, rejection sampling, and metrics
+                            # Only runs in decoupled mode (computes once per batch using stable π_old)
+                            # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
+                            if (
+                                rollout_corr_config is not None
+                                and "rollout_log_probs" in batch.batch
+                                and not bypass_recomputing_logprobs  # Only in decoupled mode
+                            ):
+                                from verl.trainer.ppo.rollout_corr_helper import (
+                                    compute_rollout_correction_and_add_to_batch,
+                                )
+
+                                # Compute IS weights, apply rejection sampling, compute metrics
+                                batch, is_metrics = compute_rollout_correction_and_add_to_batch(
+                                    batch, rollout_corr_config
+                                )
+                                # IS and off-policy metrics already have rollout_corr/ prefix
+                                metrics.update(is_metrics)
+
+                            # compute advantages, executed on the driver process
+                            norm_adv_by_std_in_grpo = self.config.algorithm.get(
+                                "norm_adv_by_std_in_grpo", True
+                            )  # GRPO adv normalization factor
+
+                            batch = compute_advantage(
+                                batch,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                                gamma=self.config.algorithm.gamma,
+                                lam=self.config.algorithm.lam,
+                                num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                config=self.config.algorithm,
                             )
-                            metrics.update(kl_metrics)
-                        else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-
-                        # Compute rollout correction: IS weights, rejection sampling, and metrics
-                        # Only runs in decoupled mode (computes once per batch using stable π_old)
-                        # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
-                        if (
-                            rollout_corr_config is not None
-                            and "rollout_log_probs" in batch.batch
-                            and not bypass_recomputing_logprobs  # Only in decoupled mode
-                        ):
-                            from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
-
-                            # Compute IS weights, apply rejection sampling, compute metrics
-                            batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
-                            # IS and off-policy metrics already have rollout_corr/ prefix
-                            metrics.update(is_metrics)
-
-                        # compute advantages, executed on the driver process
-                        norm_adv_by_std_in_grpo = self.config.algorithm.get(
-                            "norm_adv_by_std_in_grpo", True
-                        )  # GRPO adv normalization factor
-
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
-                        )
+                    else:
+                        # Keep rollout/data metrics available while avoiding
+                        # expensive logprob/advantage work for no-target SDPO
+                        # batches. These tensors are diagnostic placeholders
+                        # only; the actor/critic updates are skipped below.
+                        placeholder = torch.zeros_like(batch.batch["response_mask"], dtype=reward_tensor.dtype)
+                        batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                        batch.batch["advantages"] = placeholder
+                        batch.batch["returns"] = placeholder
+                        if self.use_critic:
+                            batch.batch["values"] = placeholder
+                        metrics["self_distillation/placeholder_metrics_empty_target"] = 1.0
 
                     # update critic
                     if self.use_critic and (skip_actor_update_due_env_error or skip_actor_update_due_empty_sdpo):
@@ -2487,28 +2613,7 @@ class RayPPOTrainer:
                         else:
                             with marked_timer("sdpo_ema_teacher", timing_raw, color="purple"):
                                 metrics.update(self._maybe_update_sdpo_ema_teacher())
-
-                        # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                        esi_close_to_expiration = should_save_ckpt_esi(
-                            max_steps_duration=self.max_steps_duration,
-                            redundant_time=self.config.trainer.esi_redundant_time,
-                        )
-                        # Check if the conditions for saving a checkpoint are met.
-                        # The conditions include a mandatory condition (1) and
-                        # one of the following optional conditions (2/3/4):
-                        # 1. The save frequency is set to a positive value.
-                        # 2. It's the last training step.
-                        # 3. The current step number is a multiple of the save frequency.
-                        # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                        if self.config.trainer.save_freq > 0 and (
-                            is_last_step
-                            or self.global_steps % self.config.trainer.save_freq == 0
-                            or esi_close_to_expiration
-                        ):
-                            if esi_close_to_expiration:
-                                print("Force saving checkpoint: ESI instance expiration approaching.")
-                            with marked_timer("save_checkpoint", timing_raw, color="green"):
-                                self._save_checkpoint()
+                            self._actor_update_count += 1
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
@@ -2516,10 +2621,43 @@ class RayPPOTrainer:
 
                         metrics.update(actor_output_metrics)
 
+                    metrics["trainer/actor_update_count"] = float(self._actor_update_count)
+                    metrics["trainer/actor_updates_since_last_checkpoint"] = float(
+                        self._actor_update_count - self._last_checkpoint_actor_update_count
+                    )
+                    # Checkpoint on scheduled boundaries if any actor step
+                    # changed weights since the previous checkpoint. This
+                    # preserves skipped-boundary checkpoints without saving
+                    # duplicate weights on no-update intervals.
+                    esi_close_to_expiration = should_save_ckpt_esi(
+                        max_steps_duration=self.max_steps_duration,
+                        redundant_time=self.config.trainer.esi_redundant_time,
+                    )
+                    checkpoint_due = self.config.trainer.save_freq > 0 and (
+                        is_last_step
+                        or self.global_steps % self.config.trainer.save_freq == 0
+                        or esi_close_to_expiration
+                    )
+                    weights_changed_since_checkpoint = (
+                        self._actor_update_count > self._last_checkpoint_actor_update_count
+                    )
+                    metrics["trainer/checkpoint_due"] = float(checkpoint_due)
+                    metrics["trainer/checkpoint_weights_changed_since_last"] = float(weights_changed_since_checkpoint)
+                    if checkpoint_due and weights_changed_since_checkpoint:
+                        if esi_close_to_expiration:
+                            print("Force saving checkpoint: ESI instance expiration approaching.")
+                        with marked_timer("save_checkpoint", timing_raw, color="green"):
+                            self._save_checkpoint()
+                        self._last_checkpoint_actor_update_count = self._actor_update_count
+                        metrics["trainer/checkpoint_saved_weights_changed"] = 1.0
+                    elif checkpoint_due:
+                        metrics["trainer/checkpoint_skipped_no_weight_change"] = 1.0
+
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                    self._log_sdpo_mask_debug(batch, reward_tensor, reward_extra_infos_dict, timing_raw)
 
                 # validate
                 if self.config.trainer.test_freq > 0 and (

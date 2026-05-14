@@ -1346,6 +1346,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         topk_log_probs_rmpad, cu_seqlens
                     )
                     model_output["teacher_ids"] = torch.nested.nested_tensor_from_jagged(topk_indices_rmpad, cu_seqlens)
+                    del topk_logits_rmpad, log_norm_rmpad, topk_log_probs_rmpad, topk_indices_rmpad
 
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
                 if distillation_use_topk:

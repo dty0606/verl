@@ -73,6 +73,10 @@ def _sdpo_ema_finite_check_enabled() -> bool:
     return _env_flag("SDPO_EMA_FINITE_CHECK") or _env_flag("SDPO_FAIL_FAST_NONFINITE")
 
 
+def _sdpo_ema_aggressive_empty_cache_enabled() -> bool:
+    return _env_flag("SDPO_EMA_AGGRESSIVE_EMPTY_CACHE")
+
+
 def _is_vision_tower_param_name(name: str) -> bool:
     vision_markers = {"visual", "vision_model", "vision_tower", "vision_encoder"}
     return bool(vision_markers.intersection(name.split(".")))
@@ -231,12 +235,16 @@ def _finish_sdpo_cuda_memory_diagnostics(
     metrics: dict[str, float] = {}
     for key, value in before.items():
         metrics[f"cuda_memory/before_{key}"] = float(value)
+        metrics[f"cuda_memory/{phase}/before_{key}"] = float(value)
     for key, value in after.items():
         metrics[f"cuda_memory/after_{key}"] = float(value)
+        metrics[f"cuda_memory/{phase}/after_{key}"] = float(value)
     if "max_allocated_gib" in after:
         metrics["cuda_memory/peak_allocated_gib"] = float(after["max_allocated_gib"])
+        metrics[f"cuda_memory/{phase}/peak_allocated_gib"] = float(after["max_allocated_gib"])
     if "max_reserved_gib" in after:
         metrics["cuda_memory/peak_reserved_gib"] = float(after["max_reserved_gib"])
+        metrics[f"cuda_memory/{phase}/peak_reserved_gib"] = float(after["max_reserved_gib"])
     return metrics
 
 
@@ -1056,29 +1064,41 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "Set tau3.sdpo.teacher_backend=actor_snapshot to use the current actor snapshot instead."
             )
 
-        device = get_device_name()
-        self.actor.engine.to(device=device, model=True, optimizer=False, grad=False)
-        self.ref.engine.to(device=device, model=True, optimizer=False, grad=False)
+        memory_before = _begin_sdpo_cuda_memory_diagnostics("ema_teacher_update")
+        try:
+            device = get_device_name()
+            self.actor.engine.to(device=device, model=True, optimizer=False, grad=False)
+            self.ref.engine.to(device=device, model=True, optimizer=False, grad=False)
 
-        actor_module = getattr(self.actor.engine, "module", None)
-        teacher_module = getattr(self.ref.engine, "module", None)
-        if actor_module is None or teacher_module is None:
-            raise NotImplementedError(
-                "SDPO EMA teacher update currently supports model engines exposing `.module` "
-                f"(actor={type(self.actor.engine).__name__}, ref={type(self.ref.engine).__name__})."
+            actor_module = getattr(self.actor.engine, "module", None)
+            teacher_module = getattr(self.ref.engine, "module", None)
+            if actor_module is None or teacher_module is None:
+                raise NotImplementedError(
+                    "SDPO EMA teacher update currently supports model engines exposing `.module` "
+                    f"(actor={type(self.actor.engine).__name__}, ref={type(self.ref.engine).__name__})."
+                )
+
+            skip_vision_tower = bool(self.config.actor.get("freeze_vision_tower", False))
+            metrics = ema_update_module_params(
+                teacher_module,
+                actor_module,
+                update_rate,
+                skip_frozen_params=True,
+                skip_vision_tower=skip_vision_tower,
             )
-
-        skip_vision_tower = bool(self.config.actor.get("freeze_vision_tower", False))
-        metrics = ema_update_module_params(
-            teacher_module,
-            actor_module,
-            update_rate,
-            skip_frozen_params=True,
-            skip_vision_tower=skip_vision_tower,
-        )
-        if self.ref.engine.is_param_offload_enabled:
-            self.ref.engine.to(device="cpu", model=True, optimizer=False, grad=False)
-        aggressive_empty_cache(force_sync=True)
+            if self.ref.engine.is_param_offload_enabled:
+                self.ref.engine.to(device="cpu", model=True, optimizer=False, grad=False)
+            if _sdpo_ema_aggressive_empty_cache_enabled():
+                aggressive_empty_cache(force_sync=True)
+        except Exception as exc:
+            _finish_sdpo_cuda_memory_diagnostics(
+                "ema_teacher_update",
+                memory_before,
+                event="exception",
+                error=exc,
+            )
+            raise
+        metrics.update(_finish_sdpo_cuda_memory_diagnostics("ema_teacher_update", memory_before))
         return metrics
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

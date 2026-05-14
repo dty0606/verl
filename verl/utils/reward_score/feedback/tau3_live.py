@@ -21,6 +21,13 @@ GENERIC_REFUSAL_PATTERNS = [
     r"\bcan not\b",
 ]
 
+TRANSFER_TOOL_NAME = "transfer_to_human_agents"
+TRANSFER_TEXT_MARKER_PATTERNS = [
+    r"\btransfer_to_human_agents\b",
+    r"\btransfer(?:red|ring)?\s+(?:you\s+)?to\s+(?:a\s+)?human\s+agent[s]?\b",
+    r"\bhuman\s+agent[s]?\s+(?:will|can)\s+(?:assist|help|take over)\b",
+]
+
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
@@ -44,6 +51,13 @@ def _parse_ground_truth(ground_truth: Any) -> dict[str, Any]:
     return {}
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _extract_live_result(extra_info: dict[str, Any] | None) -> dict[str, Any]:
     extra_info = extra_info or {}
     if isinstance(extra_info.get("tau3_live_result"), dict):
@@ -54,6 +68,93 @@ def _extract_live_result(extra_info: dict[str, Any] | None) -> dict[str, Any]:
         return dict(tool_extra_fields["tau3_live_result"])
 
     return {}
+
+
+def _tool_name(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("name")
+    return str(value or "").strip()
+
+
+def _executed_tool_names(live_result: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for item in live_result.get("executed_tools") or []:
+        name = _tool_name(item)
+        if name:
+            names.append(name)
+
+    # Some summaries include richer tool events. Only count successful events
+    # for strict reward evidence, matching Tau3GymLiveSession.executed_tools.
+    for event in live_result.get("tool_events") or []:
+        if not isinstance(event, dict) or event.get("success") is False:
+            continue
+        name = _tool_name(event)
+        if name:
+            names.append(name)
+
+    seen: set[str] = set()
+    unique_names: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            unique_names.append(name)
+    return unique_names
+
+
+def _expected_action_names(parsed_ground_truth: dict[str, Any], live_result: dict[str, Any]) -> list[str]:
+    expected_actions = parsed_ground_truth.get("expected_actions") or live_result.get("expected_actions") or []
+    names: list[str] = []
+    if isinstance(expected_actions, list):
+        for action in expected_actions:
+            name = _tool_name(action)
+            if name:
+                names.append(name)
+    return names
+
+
+def _has_transfer_text_marker(text: str) -> bool:
+    return _contains_any_regex(_normalize(text), TRANSFER_TEXT_MARKER_PATTERNS)
+
+
+def _strict_action_overlay_enabled(*, runtime: str) -> bool:
+    return _env_flag("TAU3_STRICT_ACTION_REWARD", default=(runtime == "official_gym"))
+
+
+def _strict_action_reward_qc(
+    *,
+    official_score: float,
+    parsed_ground_truth: dict[str, Any],
+    live_result: dict[str, Any],
+    final_assistant: str,
+    runtime: str,
+) -> dict[str, float | bool | str]:
+    enabled = _strict_action_overlay_enabled(runtime=runtime)
+    executed_tools = _executed_tool_names(live_result)
+    executed_set = set(executed_tools)
+    expected_actions = _expected_action_names(parsed_ground_truth, live_result)
+    missing_expected = [name for name in expected_actions if name not in executed_set]
+    transfer_marker_without_tool = _has_transfer_text_marker(final_assistant) and TRANSFER_TOOL_NAME not in executed_set
+
+    strict_required = bool(expected_actions or transfer_marker_without_tool)
+    strict_pass = (not missing_expected) and not transfer_marker_without_tool
+    violation = enabled and strict_required and not strict_pass
+    strict_score = 0.0 if violation else float(official_score)
+    official_success = float(official_score) > 0.0
+
+    return {
+        "enabled": enabled,
+        "strict_score": strict_score,
+        "strict_required": strict_required,
+        "strict_pass": strict_pass,
+        "violation": violation,
+        "expected_action_count": float(len(expected_actions)),
+        "check_count": float(len(expected_actions) + (1 if transfer_marker_without_tool else 0)),
+        "transfer_marker_without_tool": transfer_marker_without_tool,
+        "official_success_zero_tool": official_success and not executed_tools,
+        "official_success_strict_override": official_success and violation,
+        "high_trust_success": official_success and enabled and strict_pass,
+        "missing_expected_actions": ",".join(missing_expected),
+    }
 
 
 def _is_terminal_live_result(live_result: dict[str, Any]) -> bool:
@@ -158,6 +259,7 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
 
     if solution_str is None:
         solution_str = kwargs.get("solution", "")
+    extra_info = extra_info or {}
 
     parsed_ground_truth = _parse_ground_truth(ground_truth)
     live_result = _extract_live_result(extra_info)
@@ -189,6 +291,18 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
     feedback = ""
 
     runtime = str(live_result.get("runtime") or extra_info.get("tau3_runtime") or "").lower()
+    strict_qc = _strict_action_reward_qc(
+        official_score=float(reward),
+        parsed_ground_truth=parsed_ground_truth,
+        live_result=live_result,
+        final_assistant=final_assistant,
+        runtime=runtime,
+    )
+    training_reward = float(strict_qc["strict_score"])
+    if strict_qc["official_success_strict_override"]:
+        strict_feedback = "Strict training reward failed due to strict action violation."
+        feedback = f"{feedback}\n{strict_feedback}".strip() if feedback else strict_feedback
+
     terminal = float(_is_terminal_live_result(live_result))
     terminal_reason = str(live_result.get("terminal_reason") or "").lower()
     env_error = float(_is_env_error_live_result(live_result))
@@ -209,8 +323,8 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         feedback = ""
 
     result = {
-        "score": float(reward),
-        "acc": float(reward),
+        "score": training_reward,
+        "acc": training_reward,
         "pred": pred,
         "incorrect_format": int(bool(live_result.get("last_parse_error"))),
         "feedback": feedback,
@@ -233,6 +347,31 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         "tau3_live/bedrock_fallback_fraction": float(bool(live_result.get("bedrock_fallback_model"))),
         "tau3_live/turn_count": turn_count,
         "tau3_live/tool_count": tool_count,
+        "official_score": float(reward),
+        "strict_score": training_reward,
+        "strict_action_overlay_enabled_fraction": float(bool(strict_qc["enabled"])),
+        "strict_action_required_fraction": float(bool(strict_qc["strict_required"])),
+        "strict_action_pass_fraction": float(bool(strict_qc["strict_pass"])),
+        "strict_action_violation_fraction": float(bool(strict_qc["violation"])),
+        "strict_action_check_count": float(strict_qc["check_count"]),
+        "strict_expected_action_count": float(strict_qc["expected_action_count"]),
+        "transfer_marker_without_tool_fraction": float(bool(strict_qc["transfer_marker_without_tool"])),
+        "official_success_zero_tool_fraction": float(bool(strict_qc["official_success_zero_tool"])),
+        "official_success_strict_override_fraction": float(bool(strict_qc["official_success_strict_override"])),
+        "tau3_live/official_score": float(reward),
+        "tau3_live/strict_score": training_reward,
+        "tau3_live/strict_action_overlay_enabled_fraction": float(bool(strict_qc["enabled"])),
+        "tau3_live/strict_action_required_fraction": float(bool(strict_qc["strict_required"])),
+        "tau3_live/strict_action_pass_fraction": float(bool(strict_qc["strict_pass"])),
+        "tau3_live/strict_action_violation_fraction": float(bool(strict_qc["violation"])),
+        "tau3_live/strict_action_check_count": float(strict_qc["check_count"]),
+        "tau3_live/strict_expected_action_count": float(strict_qc["expected_action_count"]),
+        "tau3_live/transfer_marker_without_tool_fraction": float(bool(strict_qc["transfer_marker_without_tool"])),
+        "tau3_live/official_success_zero_tool_fraction": float(bool(strict_qc["official_success_zero_tool"])),
+        "tau3_live/official_success_strict_override_fraction": float(
+            bool(strict_qc["official_success_strict_override"])
+        ),
+        "tau3_live/strict_action_high_trust_success_fraction": float(bool(strict_qc["high_trust_success"])),
     }
     result.update(diagnostic_metrics)
 
