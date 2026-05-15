@@ -47,7 +47,7 @@ direction.
 ## Diagnostic Tarball
 
 `west_p5_p1_stab_action_aware_faithful_peer_sdpo_210step_v3_diagnostics_20260515_214020.tgz`
-(57 MB, git-ignored via `.gitignore: **/*.tar.gz`)
+(57 MB, S3/local only; `.tgz` files are git-ignored)
 
 Contents:
 - `home/sagemaker-user/tw/logs/<RUN_STEM>.nohup.log` — full step trace
