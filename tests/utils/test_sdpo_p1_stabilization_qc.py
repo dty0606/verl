@@ -116,4 +116,5 @@ def test_report_template_contains_global_safety_rules():
     assert "test_tau3_strict_action_reward.py" in template
     assert "test_tau3_sdpo_mask_debug.py" in template
     assert "test_sdpo_same_uid_group_metrics.py" in template
+    assert "test_tracking_finish.py" in template
     assert "Same-UID homogeneity metrics" in template

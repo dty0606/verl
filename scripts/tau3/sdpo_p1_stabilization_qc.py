@@ -28,6 +28,7 @@ LOCAL_TEST_COMMANDS = [
     "tests/utils/test_rollout_skip_on_cpu.py "
     "tests/utils/test_mlflow_key_sanitization.py "
     "tests/utils/test_sdpo_same_uid_group_metrics.py "
+    "tests/utils/test_tracking_finish.py "
     "tests/utils/test_sdpo_p1_stabilization_qc.py",
     "python scripts/tau3/sdpo_p1_stabilization_qc.py --help",
 ]
