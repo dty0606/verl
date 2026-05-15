@@ -97,15 +97,38 @@ def _executed_tool_names(live_result: dict[str, Any]) -> list[str]:
     return names
 
 
-def _expected_action_names(parsed_ground_truth: dict[str, Any], live_result: dict[str, Any]) -> list[str]:
-    expected_actions = parsed_ground_truth.get("expected_actions") or live_result.get("expected_actions") or []
+def _action_names_from_items(actions: Any) -> list[str]:
+    if isinstance(actions, dict):
+        actions = [actions]
     names: list[str] = []
-    if isinstance(expected_actions, list):
-        for action in expected_actions:
-            name = _tool_name(action)
-            if name:
-                names.append(name)
+    if not isinstance(actions, list):
+        return names
+    for action in actions:
+        if isinstance(action, dict):
+            requestor = str(action.get("requestor") or "assistant").strip().lower()
+            if requestor and requestor != "assistant":
+                continue
+        name = _tool_name(action)
+        if name:
+            names.append(name)
     return names
+
+
+def _expected_action_names(parsed_ground_truth: dict[str, Any], live_result: dict[str, Any]) -> list[str]:
+    # Prefer canonical task annotations over runtime metadata. Runtime
+    # expected_actions can be partial or malformed and should not suppress
+    # evaluation_criteria.actions from the ground truth.
+    for actions in (
+        parsed_ground_truth.get("expected_actions"),
+        (parsed_ground_truth.get("evaluation_criteria") or {}).get("actions")
+        if isinstance(parsed_ground_truth.get("evaluation_criteria"), dict)
+        else None,
+        live_result.get("expected_actions"),
+    ):
+        names = _action_names_from_items(actions)
+        if names:
+            return names
+    return []
 
 
 def _has_transfer_text_marker(text: str) -> bool:
@@ -143,11 +166,11 @@ def _strict_action_reward_qc(
     transfer_marker_without_tool = _has_transfer_text_marker(final_assistant) and executed_counts.get(TRANSFER_TOOL_NAME, 0) <= 0
     official_success = float(official_score) > 0.0
     zero_tool_official_success = official_success and not executed_tools
+    zero_tool_official_success_with_actions = zero_tool_official_success and bool(expected_actions)
+    zero_tool_official_success_without_actions = zero_tool_official_success and not bool(expected_actions)
 
-    strict_required = bool(expected_actions or transfer_marker_without_tool or zero_tool_official_success)
+    strict_required = bool(expected_actions or transfer_marker_without_tool)
     strict_pass = (not missing_expected) and not transfer_marker_without_tool
-    if zero_tool_official_success:
-        strict_pass = False
     violation = enabled and strict_required and not strict_pass
     strict_score = 0.0 if violation else float(official_score)
 
@@ -161,8 +184,10 @@ def _strict_action_reward_qc(
         "check_count": float(len(expected_actions) + (1 if transfer_marker_without_tool else 0)),
         "transfer_marker_without_tool": transfer_marker_without_tool,
         "official_success_zero_tool": zero_tool_official_success,
+        "official_success_zero_tool_with_actions": zero_tool_official_success_with_actions,
+        "official_success_zero_tool_without_actions": zero_tool_official_success_without_actions,
         "official_success_strict_override": official_success and violation,
-        "high_trust_success": official_success and enabled and strict_pass,
+        "high_trust_success": official_success and enabled and strict_required and strict_pass,
         "missing_expected_actions": ",".join(missing_expected),
     }
 
@@ -363,6 +388,12 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         "strict_expected_action_count": float(strict_qc["expected_action_count"]),
         "transfer_marker_without_tool_fraction": float(bool(strict_qc["transfer_marker_without_tool"])),
         "official_success_zero_tool_fraction": float(bool(strict_qc["official_success_zero_tool"])),
+        "official_success_zero_tool_with_actions_fraction": float(
+            bool(strict_qc["official_success_zero_tool_with_actions"])
+        ),
+        "official_success_zero_tool_without_actions_fraction": float(
+            bool(strict_qc["official_success_zero_tool_without_actions"])
+        ),
         "official_success_strict_override_fraction": float(bool(strict_qc["official_success_strict_override"])),
         "tau3_live/official_score": float(reward),
         "tau3_live/strict_score": training_reward,
@@ -374,6 +405,12 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         "tau3_live/strict_expected_action_count": float(strict_qc["expected_action_count"]),
         "tau3_live/transfer_marker_without_tool_fraction": float(bool(strict_qc["transfer_marker_without_tool"])),
         "tau3_live/official_success_zero_tool_fraction": float(bool(strict_qc["official_success_zero_tool"])),
+        "tau3_live/official_success_zero_tool_with_actions_fraction": float(
+            bool(strict_qc["official_success_zero_tool_with_actions"])
+        ),
+        "tau3_live/official_success_zero_tool_without_actions_fraction": float(
+            bool(strict_qc["official_success_zero_tool_without_actions"])
+        ),
         "tau3_live/official_success_strict_override_fraction": float(
             bool(strict_qc["official_success_strict_override"])
         ),
