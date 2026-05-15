@@ -1101,6 +1101,183 @@ turn/tool counts, response clip ratio, success count, tokens per success,
 
 ---
 
+## Recipe 11B: Action-Aware Faithful Peer-Only SDPO - 6K 210-Step Rerun
+
+**Current P1 rerun recipe.** Use this after the action-aware strict reward patch
+(`04732a2c`) is synced to P5. It preserves official zero-tool successes when
+the task has no explicit assistant action requirement, but still overrides
+official success when `expected_actions`, `evaluation_criteria.actions`, or a
+fake transfer marker requires tool/action evidence.
+
+This recipe is intentionally still faithful peer-only SDPO:
+
+- no dynamic sampling
+- no live cross-rollout hindsight teacher context
+- no NL assertion feedback
+- no historical rollout memory
+
+**Important storage note**: checkpoint writes are multi-GB PyTorch zip writes.
+If local disk is full, `torch.save(optimizer_state_dict, optim_path)` can crash
+with `basic_ios::clear: iostream error` or `unexpected pos ...`. Always point
+checkpoints/output/temp directories at the large storage root and fail closed if
+free space is below 500 GB.
+
+```bash
+cd ~/verl_tau3_sdpo_p1_stab
+conda activate sdpo-vllm20-v1
+
+###############################################################################
+# 0) Stop old runtime state
+###############################################################################
+ray stop --force 2>/dev/null || true
+pkill -9 -f 'vllm|ray::|raylet|verl' 2>/dev/null || true
+nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r -n1 kill -9 2>/dev/null || true
+rm -rf /tmp/ray
+rm -f /dev/shm/verl_dist_store_*
+sleep 8
+
+###############################################################################
+# 1) Storage + disk preflight
+###############################################################################
+export STORAGE_ROOT=$HOME/tw
+export SDPO_CHECKPOINT_ROOT="$STORAGE_ROOT/checkpoints/SDPO"
+export SDPO_OUTPUT_ROOT="$STORAGE_ROOT/output/SDPO"
+export WANDB_DIR="$STORAGE_ROOT/wandb"
+export TMPDIR="$STORAGE_ROOT/tmp"
+export RAY_TMPDIR="$STORAGE_ROOT/ray_tmp"
+
+mkdir -p "$SDPO_CHECKPOINT_ROOT" "$SDPO_OUTPUT_ROOT" "$WANDB_DIR" "$TMPDIR" "$RAY_TMPDIR" "$STORAGE_ROOT/logs"
+
+MIN_FREE_GB=500
+FREE_GB=$(df -BG "$STORAGE_ROOT" | awk 'NR==2 {gsub("G","",$4); print $4}')
+
+echo "Storage root: $STORAGE_ROOT"
+echo "Checkpoint root: $SDPO_CHECKPOINT_ROOT"
+echo "Output root: $SDPO_OUTPUT_ROOT"
+echo "Free space: ${FREE_GB}G"
+echo "Required free space: ${MIN_FREE_GB}G"
+df -h "$STORAGE_ROOT" "$SDPO_CHECKPOINT_ROOT" "$SDPO_OUTPUT_ROOT"
+
+if [ "${FREE_GB:-0}" -lt "$MIN_FREE_GB" ]; then
+  echo "ABORT: not enough free disk on $STORAGE_ROOT (${FREE_GB}G < ${MIN_FREE_GB}G)."
+  return 1 2>/dev/null || false
+fi
+
+###############################################################################
+# 2) Patch + data/model preflight
+###############################################################################
+echo "=== verify action-aware strict reward patch ==="
+grep -n -m 2 "official_success_zero_tool_with_actions" verl/utils/reward_score/feedback/tau3_live.py \
+  || { echo "PATCH MISSING - abort and sync from S3"; return 1 2>/dev/null || false; }
+grep -n -m 2 "_action_names_from_items" verl/utils/reward_score/feedback/tau3_live.py \
+  || { echo "PATCH MISSING - abort and sync from S3"; return 1 2>/dev/null || false; }
+
+export TASK_PATH=datasets/tau3_live_airline_canonical_json
+export MODEL_PATH=$HOME/verl_tau3_sdpo/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface
+export MODEL_ALIAS=real_sft_step800
+export PROJECT_NAME=SDPO-vllm-v1-p1-stabilization
+
+test -f "$TASK_PATH/train.parquet" || { echo "MISSING train.parquet"; return 1 2>/dev/null || false; }
+test -f "$TASK_PATH/test.parquet"  || { echo "MISSING test.parquet"; return 1 2>/dev/null || false; }
+test -f "$MODEL_PATH/config.json"  || { echo "MISSING model config"; return 1 2>/dev/null || false; }
+echo "preflight OK"
+
+###############################################################################
+# 3) Experiment config
+###############################################################################
+export RUN_STEM=west_p5_p1_stab_action_aware_faithful_peer_sdpo_210step_v4
+export TOTAL_TRAINING_STEPS=210
+export TOTAL_EPOCHS=40
+export TEST_FREQ=30
+export SAVE_FREQ=30
+export MAX_ACTOR_CKPT_TO_KEEP=99
+
+export TRAIN_BATCH_SIZE=4
+export VAL_BATCH_SIZE=4
+export ROLLOUT_BATCH_SIZE=8
+export PPO_MINI_BATCH_SIZE=4
+export PPO_MICRO_BATCH_SIZE_PER_GPU=1
+export VAL_N=4
+
+export MAX_PROMPT_LENGTH=8192
+export MAX_RESPONSE_LENGTH=6144
+export MAX_MODEL_LEN=14336
+export PPO_MAX_TOKEN_LEN_PER_GPU=14336
+export LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
+export ROLLOUT_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
+export REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=14336
+
+export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
+export TAU3_LIVE_RUNTIME=official_gym
+export TAU3_LIVE_MAX_STEPS=50
+export TAU3_MARK_ENV_EXCEPTIONS=false
+export TAU3_STRICT_ACTION_REWARD=1
+
+export SDPO_ARM=peer_only
+export SDPO_TEACHER_BACKEND=ema_ref
+export SDPO_MEMORY_ENABLED=false
+export SDPO_TARGET_GUARD_ENABLED=false
+export SDPO_MAX_REPROMPT_LEN=6144
+
+export SDPO_LOGPROB_DIAGNOSTICS=1
+export SDPO_CUDA_MEMORY_DIAGNOSTICS=1
+export SDPO_FAIL_FAST_NONFINITE=1
+export SDPO_EMA_FINITE_CHECK=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export AWS_REGION=us-west-2
+export AWS_DEFAULT_REGION=us-west-2
+
+export ROLLOUT_DATA_DIR="$STORAGE_ROOT/outputs/${RUN_STEM}/rollout_data"
+mkdir -p "$ROLLOUT_DATA_DIR"
+
+###############################################################################
+# 4) Launch
+###############################################################################
+nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" none \
+  > "$STORAGE_ROOT/logs/${RUN_STEM}.nohup.log" 2>&1 &
+echo $! > "$STORAGE_ROOT/logs/${RUN_STEM}.pid"
+disown
+
+echo "PID: $(cat "$STORAGE_ROOT/logs/${RUN_STEM}.pid")"
+echo "LOG: $STORAGE_ROOT/logs/${RUN_STEM}.nohup.log"
+echo "ROLLOUTS: $ROLLOUT_DATA_DIR"
+echo "CKPTS: $SDPO_CHECKPOINT_ROOT"
+```
+
+**Verify after launch**:
+
+```bash
+RUN_STEM=west_p5_p1_stab_action_aware_faithful_peer_sdpo_210step_v4
+
+grep -E "experiment_name|max_actor_ckpt_to_keep|rollout_data_dir|val_kwargs.n" \
+  ~/tw/logs/${RUN_STEM}.nohup.log | head -30
+
+tail -80 ~/tw/logs/${RUN_STEM}.nohup.log
+```
+
+**W&B / log checks**:
+
+- `tau3_live/official_success_zero_tool_with_actions_fraction` exists
+- `tau3_live/official_success_zero_tool_without_actions_fraction` exists
+- `tau3_live/strict_score <= tau3_live/official_score`
+- `self_distillation/feedback_used_fraction=0`
+- `self_distillation/memory_used_fraction=0`
+- `self_distillation/same_uid_strict_mixed_fraction` is monitored
+- `actor/pg_loss` and `actor/grad_norm` are finite on non-skipped steps
+- `trainer.max_actor_ckpt_to_keep=99`
+- checkpoint path is under `$STORAGE_ROOT/checkpoints/SDPO`
+
+**Stop if**:
+
+- free disk falls below the 500 GB guardrail
+- action-aware zero-tool split metrics are missing from W&B after early steps
+- W&B config shows stale `max_actor_ckpt_to_keep=3`
+- W&B config shows the old `v1`/`v2` run stem by mistake
+- any `Non-finite`, invalid top-k mass, or EMA finite-check failure appears
+- checkpoint save reports `basic_ios::clear`, `iostream error`, or `unexpected pos`
+
+---
+
 ## Recipe 11: Faithful Peer-Only SDPO - Clean 6K 240-Step Run
 
 **Goal**: run clean guarded Tau3 SDPO from the SFT checkpoint with EMA teacher,
