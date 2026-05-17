@@ -137,4 +137,9 @@ outputs
 research/diagnostics/*.tgz
 research/diagnostics/*.tar.gz
 research/diagnostics/*.zip
+research/diagnostics/*.gz
 research/diagnostics/*.log.gz
+research/runs/**/*.tgz
+research/runs/**/*.tar.gz
+research/runs/**/*.zip
+research/runs/**/*.gz
