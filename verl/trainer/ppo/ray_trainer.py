@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import hashlib
 import os
 import re
 import uuid
@@ -1806,6 +1807,146 @@ class RayPPOTrainer:
                 success_by_uid[uids[idx]].append(idx)
         return success_by_uid
 
+    @staticmethod
+    def _parse_sdpo_ground_truth(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _safe_sdpo_list_length(value: Any) -> int:
+        return len(value) if isinstance(value, list) else 0
+
+    @staticmethod
+    def _safe_sdpo_string_list(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item) for item in value if item is not None]
+        if isinstance(value, str):
+            return [value]
+        return []
+
+    @staticmethod
+    def _sdpo_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off", ""}:
+                return False
+        return bool(value)
+
+    @classmethod
+    def _render_sdpo_gt_metadata_redacted(cls, ground_truth: Any) -> str:
+        gt = cls._parse_sdpo_ground_truth(ground_truth)
+        criteria = gt.get("evaluation_criteria")
+        if not isinstance(criteria, dict):
+            return ""
+
+        rendered_actions: list[dict[str, Any]] = []
+        actions = criteria.get("actions")
+        if isinstance(actions, dict):
+            actions = [actions]
+        if isinstance(actions, list):
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                requestor = str(action.get("requestor") or "assistant").strip().lower()
+                if requestor and requestor != "assistant":
+                    continue
+                name = action.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                arguments = action.get("arguments")
+                argument_keys = sorted(str(key) for key in arguments.keys()) if isinstance(arguments, dict) else []
+                rendered_actions.append({"name": name.strip(), "argument_keys": argument_keys})
+
+        block = {
+            "gt_metadata_redacted": {
+                "reward_basis": cls._safe_sdpo_string_list(criteria.get("reward_basis")),
+                "actions": rendered_actions,
+                "communicate_info_count": cls._safe_sdpo_list_length(criteria.get("communicate_info")),
+                "nl_assertions_count": cls._safe_sdpo_list_length(criteria.get("nl_assertions")),
+            }
+        }
+        return (
+            "\n\nGround-truth evaluation metadata, values redacted:\n"
+            + json.dumps(block, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        )
+
+    @staticmethod
+    def _collect_failed_by_uid(
+        uids: list[Any],
+        failed_mask_list: list[bool],
+    ) -> dict[Any, list[int]]:
+        failed_by_uid: dict[Any, list[int]] = defaultdict(list)
+        for idx, failed in enumerate(failed_mask_list):
+            if failed and idx < len(uids):
+                failed_by_uid[uids[idx]].append(idx)
+        return failed_by_uid
+
+    @staticmethod
+    def _assistant_only_response(text: str) -> str:
+        text = text or ""
+        role_re = re.compile(r"(assistant|user|tool)(?=(?:<|:|user:|tool:|\s*$))", flags=re.IGNORECASE)
+        matches = list(role_re.finditer(text))
+        if not matches:
+            return text.strip()
+
+        chunks: list[str] = []
+        for pos, match in enumerate(matches):
+            role = match.group(1).lower()
+            start = match.end()
+            end = matches[pos + 1].start() if pos + 1 < len(matches) else len(text)
+            if role == "assistant":
+                chunk = text[start:end].strip()
+                if chunk:
+                    chunks.append(chunk)
+        return "\n\n".join(chunks).strip()
+
+    @staticmethod
+    def _cap_sdpo_text(text: str, max_chars: int) -> str:
+        text = text or ""
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "\n[truncated]"
+
+    def _get_sdpo_failed_assistant_evidence(
+        self,
+        idx: int,
+        failed_by_uid: dict[Any, list[int]],
+        uids: list[Any],
+        response_texts: list[str],
+        *,
+        max_chars: int,
+    ) -> tuple[Optional[str], bool]:
+        if idx >= len(uids):
+            return None, False
+        candidates = [j for j in failed_by_uid.get(uids[idx], []) if j != idx]
+        self_fallback = False
+        if not candidates and idx in failed_by_uid.get(uids[idx], []):
+            candidates = [idx]
+            self_fallback = True
+        if not candidates:
+            return None, False
+
+        config_seed = self.config.get("seed", 0) if hasattr(self.config, "get") else 0
+        seed_material = f"{config_seed}:{int(self.global_steps)}:{uids[idx]}:{idx}:failed_peer"
+        seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest(), 16)
+        selected_idx = candidates[seed % len(candidates)]
+        evidence = self._assistant_only_response(response_texts[selected_idx])
+        evidence = self._remove_thinking_trace(evidence)
+        evidence = self._cap_sdpo_text(evidence, max_chars).strip()
+        if not evidence:
+            return None, self_fallback
+        return evidence, self_fallback
+
     def _get_sdpo_solution(
         self,
         idx: int,
@@ -1933,6 +2074,33 @@ class RayPPOTrainer:
                 "Guarded Tau3 SDPO baseline allows only {prompt} and {solution} in the teacher reprompt template."
             )
         solution_template = sdpo_cfg.get("solution_template", "\n\nCorrect solution:\n\n{successful_previous_attempt}")
+        gt_metadata_enabled = self._sdpo_bool(sdpo_cfg.get("gt_metadata_enabled", False))
+        failed_peer_enabled = self._sdpo_bool(sdpo_cfg.get("failed_peer_enabled", False))
+        failed_peer_max_chars = int(sdpo_cfg.get("failed_peer_max_chars", 4096))
+
+        ground_truths = [
+            item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch
+        ]
+        gt_metadata_strs = (
+            [self._render_sdpo_gt_metadata_redacted(gt) for gt in ground_truths]
+            if gt_metadata_enabled
+            else [""] * batch_size
+        )
+        failed_by_uid = self._collect_failed_by_uid(uids, failed_mask_list) if failed_peer_enabled else {}
+        failed_evidence_pairs = (
+            [
+                self._get_sdpo_failed_assistant_evidence(
+                    i,
+                    failed_by_uid,
+                    uids,
+                    response_texts,
+                    max_chars=failed_peer_max_chars,
+                )
+                for i in range(batch_size)
+            ]
+            if failed_peer_enabled
+            else [(None, False)] * batch_size
+        )
 
         raw_prompts = list(batch.non_tensor_batch.get("raw_prompt", []))
         messages = []
@@ -1940,22 +2108,49 @@ class RayPPOTrainer:
         solutions_used = []
         teacher_base_prompt_token_lengths = []
         teacher_solution_token_lengths = []
+        teacher_gt_metadata_token_lengths = []
+        teacher_failed_peer_token_lengths = []
+        gt_metadata_used = []
+        failed_peer_used = []
+        failed_peer_self_fallback_used = []
+        active_without_success_peer = []
+        all_fail_gt_active = []
         for i in range(batch_size):
             raw_prompt = list(raw_prompts[i]) if i < len(raw_prompts) else []
             prompt_text = raw_prompt[-1].get("content", "") if raw_prompt else ""
             system_messages = raw_prompt[:-1] if raw_prompt else []
             on_failure_path = bool(failed_mask_list[i])
             has_solution = solution_strs[i] is not None and (on_failure_path or not only_failed_rollouts)
-            active = has_solution and (on_failure_path or not only_failed_rollouts)
+            gt_metadata_section = gt_metadata_strs[i] if i < len(gt_metadata_strs) else ""
+            failed_assistant, self_fallback = failed_evidence_pairs[i]
+            has_gt_metadata = bool(gt_metadata_section)
+            has_failed_assistant = bool(failed_assistant)
+            row_selected = on_failure_path or not only_failed_rollouts
+            has_teacher_context = has_solution or has_gt_metadata or has_failed_assistant
+            active = row_selected and has_teacher_context
 
-            solution_section = (
+            peer_solution_section = (
                 solution_template.format(successful_previous_attempt=solution_strs[i]) if has_solution else ""
             )
+            solution_parts: list[str] = []
+            if has_gt_metadata:
+                solution_parts.append(gt_metadata_section)
+            if has_solution:
+                solution_parts.append(peer_solution_section)
+            if has_failed_assistant:
+                solution_parts.append(
+                    "\n\nObserved failed assistant attempt, not a solution:\n" + str(failed_assistant)
+                )
+            solution_section = "".join(solution_parts)
             base_prompt_text = "\n\n".join(
                 str(message.get("content", "")) for message in [*system_messages, {"content": prompt_text}]
             )
             teacher_base_prompt_token_lengths.append(count_text_tokens(self.tokenizer, base_prompt_text))
-            teacher_solution_token_lengths.append(count_text_tokens(self.tokenizer, solution_section))
+            teacher_solution_token_lengths.append(count_text_tokens(self.tokenizer, peer_solution_section))
+            teacher_gt_metadata_token_lengths.append(count_text_tokens(self.tokenizer, gt_metadata_section))
+            teacher_failed_peer_token_lengths.append(
+                count_text_tokens(self.tokenizer, failed_assistant or "")
+            )
             if active:
                 reprompt_kwargs = {
                     "prompt": prompt_text,
@@ -1967,6 +2162,11 @@ class RayPPOTrainer:
             messages.append(system_messages + [{"role": "user", "content": reprompt_text}])
             target_mask_values.append(1.0 if active else 0.0)
             solutions_used.append(has_solution)
+            gt_metadata_used.append(active and has_gt_metadata)
+            failed_peer_used.append(active and has_failed_assistant)
+            failed_peer_self_fallback_used.append(active and has_failed_assistant and self_fallback)
+            active_without_success_peer.append(active and not has_solution)
+            all_fail_gt_active.append(active and has_gt_metadata and not bool(success_by_uid.get(uids[i] if i < len(uids) else None)))
         length_metrics = self._build_tau3_length_metrics(
             batch=batch,
             response_texts=response_texts,
@@ -1982,6 +2182,11 @@ class RayPPOTrainer:
                 "self_distillation/failure_fraction": float(failed_mask.float().mean().item()),
                 "self_distillation/env_error_excluded_fraction": float(env_error_mask.float().mean().item()),
                 "self_distillation/memory_used_fraction": 0.0,
+                "self_distillation/gt_metadata_used_fraction": 0.0,
+                "self_distillation/failed_peer_used_fraction": 0.0,
+                "self_distillation/failed_peer_self_fallback_fraction": 0.0,
+                "self_distillation/active_without_success_peer_fraction": 0.0,
+                "self_distillation/all_fail_gt_active_fraction": 0.0,
                 "self_distillation/teacher_prompt_token_mean": 0.0,
                 "self_distillation/teacher_prompt_saturation_fraction": 0.0,
                 "self_distillation/teacher_prompt_saturation_active_fraction": 0.0,
@@ -1991,6 +2196,8 @@ class RayPPOTrainer:
                 "tau3_length/teacher_prompt_tokens_max": 0.0,
                 "tau3_length/teacher_base_prompt_tokens_mean": float(np.mean(teacher_base_prompt_token_lengths)),
                 "tau3_length/teacher_peer_solution_tokens_mean": float(np.mean(teacher_solution_token_lengths)),
+                "tau3_length/teacher_gt_metadata_tokens_mean": float(np.mean(teacher_gt_metadata_token_lengths)),
+                "tau3_length/teacher_failed_peer_tokens_mean": float(np.mean(teacher_failed_peer_token_lengths)),
                 "tau3_length/teacher_feedback_tokens_mean": 0.0,
                 "tau3_length/teacher_memory_tokens_mean": 0.0,
                 "tau3_length/teacher_component_decomposition_approx": 1.0,
@@ -2068,6 +2275,15 @@ class RayPPOTrainer:
                 / (seq_scores >= success_threshold).float().sum().clamp(min=1.0).item()
             ),
             "self_distillation/memory_used_fraction": 0.0,
+            "self_distillation/gt_metadata_used_fraction": sum(bool(x) for x in gt_metadata_used) / batch_size,
+            "self_distillation/failed_peer_used_fraction": sum(bool(x) for x in failed_peer_used) / batch_size,
+            "self_distillation/failed_peer_self_fallback_fraction": (
+                sum(bool(x) for x in failed_peer_self_fallback_used) / batch_size
+            ),
+            "self_distillation/active_without_success_peer_fraction": (
+                sum(bool(x) for x in active_without_success_peer) / batch_size
+            ),
+            "self_distillation/all_fail_gt_active_fraction": sum(bool(x) for x in all_fail_gt_active) / batch_size,
             "self_distillation/teacher_prompt_token_mean": float(teacher_prompt_lengths.mean().item()),
             "self_distillation/teacher_prompt_saturation_fraction": float(
                 teacher_prompt_saturated.float().mean().item()
@@ -2079,6 +2295,8 @@ class RayPPOTrainer:
             "tau3_length/teacher_prompt_tokens_max": float(teacher_prompt_lengths.max().item()),
             "tau3_length/teacher_base_prompt_tokens_mean": float(np.mean(teacher_base_prompt_token_lengths)),
             "tau3_length/teacher_peer_solution_tokens_mean": float(np.mean(teacher_solution_token_lengths)),
+            "tau3_length/teacher_gt_metadata_tokens_mean": float(np.mean(teacher_gt_metadata_token_lengths)),
+            "tau3_length/teacher_failed_peer_tokens_mean": float(np.mean(teacher_failed_peer_token_lengths)),
             "tau3_length/teacher_feedback_tokens_mean": 0.0,
             "tau3_length/teacher_memory_tokens_mean": 0.0,
             "tau3_length/teacher_component_decomposition_approx": 1.0,

@@ -123,6 +123,11 @@ tau3:
     only_failed_rollouts: True
     dont_reprompt_on_self_success: True
     remove_thinking_from_demonstration: True
+    # v3.5 controlled ablation: teacher-only redacted GT metadata plus one
+    # same-UID failed assistant response. Defaults off to preserve peer-only SDPO.
+    gt_metadata_enabled: ${oc.env:SDPO_GT_METADATA_ENABLED,false}
+    failed_peer_enabled: ${oc.env:SDPO_FAILED_PEER_ENABLED,false}
+    failed_peer_max_chars: ${oc.env:SDPO_FAILED_PEER_MAX_CHARS,4096}
     # Faithful SDPO path: compute teacher logprobs with a dedicated ref copy
     # and update that copy after each actor update via
     # teacher <- (1 - rate) * teacher + rate * actor. Set to

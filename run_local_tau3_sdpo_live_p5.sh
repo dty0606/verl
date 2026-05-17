@@ -44,8 +44,22 @@ fi
 export PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 export USER="${USER:-$(whoami)}"
-export SDPO_OUTPUT_ROOT="${SDPO_OUTPUT_ROOT:-$PROJECT_ROOT/output/SDPO}"
-export SDPO_CHECKPOINT_ROOT="${SDPO_CHECKPOINT_ROOT:-$PROJECT_ROOT/checkpoints/SDPO}"
+export STORAGE_ROOT="${STORAGE_ROOT:-$HOME/tw}"
+mkdir -p "$STORAGE_ROOT"
+SDPO_MIN_FREE_GB="${SDPO_MIN_FREE_GB:-500}"
+if [ "$SDPO_MIN_FREE_GB" -gt 0 ]; then
+    FREE_GB=$(df -BG "$STORAGE_ROOT" | awk 'NR==2 {gsub("G","",$4); print $4}')
+    if [ "${FREE_GB:-0}" -lt "$SDPO_MIN_FREE_GB" ]; then
+        echo "ABORT: less than ${SDPO_MIN_FREE_GB}GB free under $STORAGE_ROOT"
+        exit 1
+    fi
+fi
+export SDPO_OUTPUT_ROOT="${SDPO_OUTPUT_ROOT:-$STORAGE_ROOT/output/SDPO}"
+export SDPO_CHECKPOINT_ROOT="${SDPO_CHECKPOINT_ROOT:-$STORAGE_ROOT/checkpoints/SDPO}"
+export WANDB_DIR="${WANDB_DIR:-$STORAGE_ROOT/wandb}"
+export TMPDIR="${TMPDIR:-$STORAGE_ROOT/tmp}"
+export RAY_TMPDIR="${RAY_TMPDIR:-$STORAGE_ROOT/ray_tmp}"
+mkdir -p "$SDPO_OUTPUT_ROOT" "$SDPO_CHECKPOINT_ROOT" "$WANDB_DIR" "$TMPDIR" "$RAY_TMPDIR" "$STORAGE_ROOT/logs"
 
 if [ -z "${TAU3_LIVE_USER_MODEL:-}" ]; then
     echo "Error: TAU3_LIVE_USER_MODEL must be set."
@@ -196,6 +210,9 @@ ARGS=(
     "tau3.sdpo.reprompt_truncation=${SDPO_REPROMPT_TRUNCATION:-right}"
     "tau3.sdpo.teacher_backend=${SDPO_TEACHER_BACKEND:-ema_ref}"
     "tau3.sdpo.teacher_update_rate=${SDPO_TEACHER_UPDATE_RATE:-0.05}"
+    "tau3.sdpo.gt_metadata_enabled=${SDPO_GT_METADATA_ENABLED:-false}"
+    "tau3.sdpo.failed_peer_enabled=${SDPO_FAILED_PEER_ENABLED:-false}"
+    "tau3.sdpo.failed_peer_max_chars=${SDPO_FAILED_PEER_MAX_CHARS:-4096}"
     "tau3.sdpo.target_guard.enabled=${SDPO_TARGET_GUARD_ENABLED:-false}"
     "tau3.sdpo.target_guard.corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0}"
     "tau3.sdpo.target_guard.mask_nonterminal=${SDPO_TARGET_GUARD_MASK_NONTERMINAL:-true}"
@@ -305,13 +322,15 @@ echo "Max response length: ${MAX_RESPONSE_LENGTH:-6144}"
 echo "SDPO max reprompt len: ${SDPO_MAX_REPROMPT_LEN:-6144}"
 echo "SDPO reprompt truncation: ${SDPO_REPROMPT_TRUNCATION:-right}"
 echo "SDPO teacher: backend=${SDPO_TEACHER_BACKEND:-ema_ref} ema_rate=${SDPO_TEACHER_UPDATE_RATE:-0.05}"
+echo "SDPO v3.5 teacher context: gt_metadata=${SDPO_GT_METADATA_ENABLED:-false} failed_peer=${SDPO_FAILED_PEER_ENABLED:-false} failed_peer_max_chars=${SDPO_FAILED_PEER_MAX_CHARS:-4096}"
 echo "SDPO loss: full_logit=${SDPO_FULL_LOGIT_DISTILLATION:-true} alpha=${SDPO_ALPHA:-0.5} topk=${SDPO_DISTILLATION_TOPK:-100} add_tail=${SDPO_DISTILLATION_ADD_TAIL:-true} topk_source=${SDPO_TOPK_SOURCE:-student_pre_update}"
 echo "SDPO logprob dynamic bsz: actor=${ACTOR_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} rollout=${ROLLOUT_LOG_PROB_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} ref=${REF_LOG_PROB_USE_DYNAMIC_BSZ:-${LOG_PROB_USE_DYNAMIC_BSZ:-false}} token_caps actor=${PPO_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}} rollout=${ROLLOUT_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}}} ref=${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN:-14336}}}"
 echo "SDPO fail-fast finite probes: fail_fast=${SDPO_FAIL_FAST_NONFINITE:-0} ema=${SDPO_EMA_FINITE_CHECK:-${SDPO_FAIL_FAST_NONFINITE:-0}}"
 echo "SDPO logprob diagnostics: ${SDPO_LOGPROB_DIAGNOSTICS:-0}"
 echo "SDPO CUDA memory diagnostics: ${SDPO_CUDA_MEMORY_DIAGNOSTICS:-${SDPO_LOGPROB_DIAGNOSTICS:-0}}"
 echo "SDPO target guard: enabled=${SDPO_TARGET_GUARD_ENABLED:-false} corrupted_row_weight=${SDPO_TARGET_GUARD_CORRUPTED_ROW_WEIGHT:-0.0} parse_error=${SDPO_TARGET_GUARD_MASK_PARSE_ERROR:-true} open_think=${SDPO_TARGET_GUARD_MASK_OPEN_THINK:-true} repetition=${SDPO_TARGET_GUARD_MASK_REPETITION:-true}"
-echo "SDPO teacher context: successful_peer_only=true heuristic_feedback=false memory=false"
+echo "SDPO teacher context: successful_peer=true heuristic_feedback=false memory=false gt_metadata=${SDPO_GT_METADATA_ENABLED:-false} failed_peer=${SDPO_FAILED_PEER_ENABLED:-false}"
+echo "Storage roots: storage=$STORAGE_ROOT checkpoints=$SDPO_CHECKPOINT_ROOT output=$SDPO_OUTPUT_ROOT wandb=$WANDB_DIR tmp=$TMPDIR ray_tmp=$RAY_TMPDIR free_gb=${FREE_GB:-unknown}"
 echo "Trainer resume: mode=${RESUME_MODE:-auto} from=${RESUME_FROM_PATH:-<auto/latest>}"
 echo "vLLM profile: $TAU3_VLLM_PROFILE"
 echo "VLLM_USE_V1: ${VLLM_USE_V1:-<unset>}"

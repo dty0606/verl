@@ -1430,3 +1430,97 @@ grep "Training Progress" ~/tw/logs/${RUN_STEM}.nohup.log | tail -1
   context is being clipped and should be reported.
 - Evaluate checkpoints with the canonical test20 grid and artifact auditor before
   comparing to GRPO step 270 baseline (0.512).
+
+## Recipe 12: v3.5 Redacted-GT + Failed-Assistant SDPO
+
+Purpose: run the controlled v3.5 teacher-context ablation. The student prompt,
+strict reward, rollout generation, and SDPO loss stay unchanged. The detached
+teacher gets redacted GT evaluation metadata and one same-UID failed assistant
+response.
+
+**Shared setup**:
+```bash
+cd ~/verl_tau3_sdpo_p1_stab
+
+export STORAGE_ROOT=$HOME/tw
+export SDPO_CHECKPOINT_ROOT="$STORAGE_ROOT/checkpoints/SDPO"
+export SDPO_OUTPUT_ROOT="$STORAGE_ROOT/output/SDPO"
+export WANDB_DIR="$STORAGE_ROOT/wandb"
+export TMPDIR="$STORAGE_ROOT/tmp"
+export RAY_TMPDIR="$STORAGE_ROOT/ray_tmp"
+mkdir -p "$SDPO_CHECKPOINT_ROOT" "$SDPO_OUTPUT_ROOT" "$WANDB_DIR" "$TMPDIR" "$RAY_TMPDIR" "$STORAGE_ROOT/logs"
+
+FREE_GB=$(df -BG "$STORAGE_ROOT" | awk 'NR==2 {gsub("G","",$4); print $4}')
+if [ "$FREE_GB" -lt 500 ]; then
+  echo "ABORT: less than 500GB free under $STORAGE_ROOT"
+  exit 1
+fi
+
+export TASK_PATH=datasets/tau3_live_airline_canonical_json
+export MODEL_PATH=$HOME/verl_tau3_sdpo/checkpoints/SDPO/tau3_verl_sft/TAU3-VERL-SFT-FULL-Qwen-Qwen3.5-4B-qwen35_4b_vlm_full_traj_sft_real_9k/global_step_800/huggingface
+export MODEL_ALIAS=real_sft_step800
+export TAU3_LIVE_USER_MODEL=us.anthropic.claude-sonnet-4-6
+export TAU3_LIVE_RUNTIME=official_gym
+export TAU3_MARK_ENV_EXCEPTIONS=false
+export TAU3_STRICT_ACTION_REWARD=1
+export VAL_N=4
+
+export SDPO_ARM=peer_only
+export SDPO_TEACHER_BACKEND=ema_ref
+export SDPO_MEMORY_ENABLED=false
+export SDPO_TARGET_GUARD_ENABLED=false
+export SDPO_GT_METADATA_ENABLED=true
+export SDPO_FAILED_PEER_ENABLED=true
+export SDPO_FAILED_PEER_MAX_CHARS=4096
+```
+
+**30-step gate**:
+```bash
+ray stop --force 2>/dev/null || true
+pkill -9 -f "vllm|ray::|raylet|verl" 2>/dev/null || true
+nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r -n1 kill -9 2>/dev/null || true
+rm -rf /tmp/ray
+rm -f /dev/shm/verl_dist_store_*
+sleep 5
+
+export RUN_STEM=west_p5_p1_stab_v35_gt_failedassistant_30step_v1
+export TOTAL_TRAINING_STEPS=30
+export TOTAL_EPOCHS=30
+export TEST_FREQ=30
+export SAVE_FREQ=30
+export MAX_ACTOR_CKPT_TO_KEEP=8
+export ROLLOUT_DATA_DIR=$STORAGE_ROOT/outputs/${RUN_STEM}/rollout_data
+mkdir -p "$ROLLOUT_DATA_DIR"
+
+nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" none \
+  > "$STORAGE_ROOT/logs/${RUN_STEM}.nohup.log" 2>&1 &
+echo $! > "$STORAGE_ROOT/logs/${RUN_STEM}.pid"
+disown
+printf 'PID: %s\n' "$(cat "$STORAGE_ROOT/logs/${RUN_STEM}.pid")"
+```
+
+**210-step run after the 30-step gate passes**:
+```bash
+export RUN_STEM=west_p5_p1_stab_v35_gt_failedassistant_210step_v1
+export TOTAL_TRAINING_STEPS=210
+export TOTAL_EPOCHS=40
+export TEST_FREQ=30
+export SAVE_FREQ=30
+export MAX_ACTOR_CKPT_TO_KEEP=8
+export ROLLOUT_DATA_DIR=$STORAGE_ROOT/outputs/${RUN_STEM}/rollout_data
+mkdir -p "$ROLLOUT_DATA_DIR"
+
+nohup bash run_local_tau3_sdpo_live_p5.sh "$TASK_PATH" "${RUN_STEM}" none \
+  > "$STORAGE_ROOT/logs/${RUN_STEM}.nohup.log" 2>&1 &
+echo $! > "$STORAGE_ROOT/logs/${RUN_STEM}.pid"
+disown
+printf 'PID: %s\n' "$(cat "$STORAGE_ROOT/logs/${RUN_STEM}.pid")"
+```
+
+**Monitor**:
+```bash
+LOG="$STORAGE_ROOT/logs/${RUN_STEM}.nohup.log"
+grep -E "gt_metadata|failed_peer|active_without_success|all_fail_gt|same_uid|empty_target" "$LOG" | tail -80
+grep -E "training/global_step|actor/pg_loss|actor/grad_norm|tau3_live/(strict_score|official_score|tool_count|official_success_zero_tool|strict_missing_expected_action_count)" "$LOG" | tail -80
+grep -E "CUDA out of memory|basic_ios::clear|unexpected pos|Non-finite|teacher_prompt_saturation|ABORT|Error executing job" "$LOG" | tail -80
+```

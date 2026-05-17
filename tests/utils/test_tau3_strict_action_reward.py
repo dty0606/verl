@@ -83,6 +83,11 @@ def test_strict_action_overlay_preserves_official_success_when_expected_action_e
     assert result["tau3_live/strict_action_pass_fraction"] == 1.0
     assert result["tau3_live/strict_action_violation_fraction"] == 0.0
     assert result["tau3_live/strict_expected_action_count"] == 1.0
+    assert result["tau3_live/strict_executed_action_count"] == 1.0
+    assert result["tau3_live/strict_missing_expected_action_count"] == 0.0
+    assert result["tau3_action_executed_names_json"] == '["transfer_to_human_agents"]'
+    assert result["tau3_action_expected_names_json"] == '["transfer_to_human_agents"]'
+    assert result["tau3_action_missing_names_json"] == "[]"
     assert result["tau3_live/strict_action_high_trust_success_fraction"] == 1.0
 
 
@@ -194,6 +199,11 @@ def test_evaluation_criteria_actions_are_required_for_strict_success(monkeypatch
 
     assert result["score"] == 0.0
     assert result["tau3_live/strict_expected_action_count"] == 1.0
+    assert result["tau3_live/strict_executed_action_count"] == 0.0
+    assert result["tau3_live/strict_missing_expected_action_count"] == 1.0
+    assert result["tau3_action_executed_names_json"] == "[]"
+    assert result["tau3_action_expected_names_json"] == '["get_reservation_details"]'
+    assert result["tau3_action_missing_names_json"] == '["get_reservation_details"]'
     assert result["tau3_live/strict_action_required_fraction"] == 1.0
     assert result["tau3_live/strict_action_violation_fraction"] == 1.0
     assert result["tau3_live/official_success_zero_tool_with_actions_fraction"] == 1.0
@@ -232,6 +242,11 @@ def test_evaluation_criteria_actions_pass_when_required_tool_executed(monkeypatc
 
     assert result["score"] == 1.0
     assert result["tau3_live/strict_expected_action_count"] == 1.0
+    assert result["tau3_live/strict_executed_action_count"] == 1.0
+    assert result["tau3_live/strict_missing_expected_action_count"] == 0.0
+    assert result["tau3_action_executed_names_json"] == '["get_reservation_details"]'
+    assert result["tau3_action_expected_names_json"] == '["get_reservation_details"]'
+    assert result["tau3_action_missing_names_json"] == "[]"
     assert result["tau3_live/strict_action_violation_fraction"] == 0.0
 
 
@@ -339,6 +354,43 @@ def test_transfer_marker_with_actual_transfer_tool_passes(monkeypatch: pytest.Mo
     )
 
     assert result["score"] == 1.0
+
+
+def test_action_audit_uses_successful_tool_events_when_executed_tools_absent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("TAU3_STRICT_ACTION_REWARD", raising=False)
+
+    result = tau3_live.compute_score(
+        solution_str="I checked this for you.",
+        ground_truth={
+            "label": "success",
+            "evaluation_criteria": {
+                "actions": [{"requestor": "assistant", "name": "get_user_details"}]
+            },
+        },
+        extra_info={
+            "tau3_live_result": {
+                "runtime": "official_gym",
+                "status": "terminated",
+                "terminal_reason": "user_stop",
+                "final_reward": 1.0,
+                "executed_tools": [],
+                "tool_events": [
+                    {"name": "get_user_details", "success": True},
+                    {"name": "get_reservation_details", "success": False},
+                ],
+                "latest_assistant_message": "I checked this for you.",
+            }
+        },
+    )
+
+    assert result["score"] == 1.0
+    assert result["tau3_live/strict_executed_action_count"] == 1.0
+    assert result["tau3_live/strict_missing_expected_action_count"] == 0.0
+    assert result["tau3_action_executed_names_json"] == '["get_user_details"]'
+    assert result["tau3_action_expected_names_json"] == '["get_user_details"]'
+    assert result["tau3_action_missing_names_json"] == "[]"
     assert result["tau3_live/transfer_marker_without_tool_fraction"] == 0.0
     assert result["tau3_live/strict_action_violation_fraction"] == 0.0
 

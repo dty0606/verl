@@ -180,7 +180,9 @@ def _strict_action_reward_qc(
         "strict_required": strict_required,
         "strict_pass": strict_pass,
         "violation": violation,
+        "executed_action_count": float(len(executed_tools)),
         "expected_action_count": float(len(expected_actions)),
+        "missing_expected_action_count": float(len(missing_expected)),
         "check_count": float(len(expected_actions) + (1 if transfer_marker_without_tool else 0)),
         "transfer_marker_without_tool": transfer_marker_without_tool,
         "official_success_zero_tool": zero_tool_official_success,
@@ -189,6 +191,9 @@ def _strict_action_reward_qc(
         "official_success_strict_override": official_success and violation,
         "high_trust_success": official_success and enabled and strict_required and strict_pass,
         "missing_expected_actions": ",".join(missing_expected),
+        "executed_action_names_json": json.dumps(executed_tools, ensure_ascii=True, separators=(",", ":")),
+        "expected_action_names_json": json.dumps(expected_actions, ensure_ascii=True, separators=(",", ":")),
+        "missing_expected_action_names_json": json.dumps(missing_expected, ensure_ascii=True, separators=(",", ":")),
     }
 
 
@@ -385,7 +390,9 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         "strict_action_pass_fraction": float(bool(strict_qc["strict_pass"])),
         "strict_action_violation_fraction": float(bool(strict_qc["violation"])),
         "strict_action_check_count": float(strict_qc["check_count"]),
+        "strict_executed_action_count": float(strict_qc["executed_action_count"]),
         "strict_expected_action_count": float(strict_qc["expected_action_count"]),
+        "strict_missing_expected_action_count": float(strict_qc["missing_expected_action_count"]),
         "transfer_marker_without_tool_fraction": float(bool(strict_qc["transfer_marker_without_tool"])),
         "official_success_zero_tool_fraction": float(bool(strict_qc["official_success_zero_tool"])),
         "official_success_zero_tool_with_actions_fraction": float(
@@ -402,7 +409,9 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
         "tau3_live/strict_action_pass_fraction": float(bool(strict_qc["strict_pass"])),
         "tau3_live/strict_action_violation_fraction": float(bool(strict_qc["violation"])),
         "tau3_live/strict_action_check_count": float(strict_qc["check_count"]),
+        "tau3_live/strict_executed_action_count": float(strict_qc["executed_action_count"]),
         "tau3_live/strict_expected_action_count": float(strict_qc["expected_action_count"]),
+        "tau3_live/strict_missing_expected_action_count": float(strict_qc["missing_expected_action_count"]),
         "tau3_live/transfer_marker_without_tool_fraction": float(bool(strict_qc["transfer_marker_without_tool"])),
         "tau3_live/official_success_zero_tool_fraction": float(bool(strict_qc["official_success_zero_tool"])),
         "tau3_live/official_success_zero_tool_with_actions_fraction": float(
@@ -415,6 +424,9 @@ def compute_score(solution_str: str | None = None, ground_truth: Any = None, ext
             bool(strict_qc["official_success_strict_override"])
         ),
         "tau3_live/strict_action_high_trust_success_fraction": float(bool(strict_qc["high_trust_success"])),
+        "tau3_action_executed_names_json": str(strict_qc["executed_action_names_json"]),
+        "tau3_action_expected_names_json": str(strict_qc["expected_action_names_json"]),
+        "tau3_action_missing_names_json": str(strict_qc["missing_expected_action_names_json"]),
     }
     result.update(diagnostic_metrics)
 
